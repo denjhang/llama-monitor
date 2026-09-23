@@ -14,3 +14,7 @@ bisect*.log
 ftllm*.log
 baseline*.log
 llama-b11139/
+LICENSE-LLVM-OpenMP
+tee-usage.jsonl
+live-gen.txt
+server-mode.txt
