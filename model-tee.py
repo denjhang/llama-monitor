@@ -1,20 +1,85 @@
 # -*- coding: utf-8 -*-
-"""model-tee：8080 -> 8082 流式透传代理
+"""model-tee：8080 -> 8082 流式透传代理（状态机版）
 - 客户端照常连 http://127.0.0.1:8080（OpenAI/Anthropic 协议均透传）
-- 转发同时把生成增量 tee 到 live-gen.txt（监控台实时显示）
-- usage 流水追加 tee-usage.jsonl
+- 智能状态识别：填充中/读图中/压缩中/思考中/输出文字中/工具调用中/写入参数中
+- 状态行 + 内容实时写 live-gen.txt（监控台显示）
+- nothink 模式下剥掉请求级思考参数（防客户端覆盖）
+- usage 流水 tee-usage.jsonl
 """
 import http.server, json, os, time, urllib.request, urllib.error
 
 UPSTREAM = "http://127.0.0.1:8082"
 LIVE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
 USAGE = r"E:\working\llama-cpp\llama-b11139\tee-usage.jsonl"
+MODE_FILE = r"E:\working\llama-cpp\llama-b11139\server-mode.txt"
+
+COMPACT_KEYS = ("summarize the conversation", "conversation summary", "compact",
+                "历史对话", "压缩", "总结以上对话", "生成摘要")
 
 def write_live(text):
     with open(LIVE, "w", encoding="utf-8") as f:
         f.write(text[-4000:])
 
-def handle_sse_line(line, out_txt):
+def mode():
+    try:
+        return open(MODE_FILE, encoding="utf-8").read().strip()
+    except OSError:
+        return "think"
+
+def classify_request(d):
+    """请求进来时判定：读图/压缩/普通填充，返回（状态行, 预览文本）"""
+    msgs = d.get("messages") or []
+    last_user = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
+    c = last_user.get("content") if last_user else None
+    has_image = False
+    text = ""
+    if isinstance(c, list):
+        for x in c:
+            if isinstance(x, dict):
+                if x.get("type") in ("image_url", "image") or "image_url" in x:
+                    has_image = True
+                text += x.get("text", "") + " "
+    elif isinstance(c, str):
+        text = c
+    # 压缩判定：系统提示或用户消息带总结指令
+    all_text = text + " "
+    for m in msgs[:3]:
+        cc = m.get("content")
+        if isinstance(cc, str):
+            all_text += cc + " "
+    is_compact = any(k in all_text.lower() for k in COMPACT_KEYS)
+    text_flat = " ".join(text.split())
+    est_tok = len(text_flat) // 2
+    if is_compact:
+        st = f"● 压缩中（上下文整理，~{est_tok} tok 输入）"
+    elif has_image:
+        st = f"● 读图中（多模态嵌入 + 预填充，~{est_tok} tok 文本）"
+    else:
+        st = f"● 填充中（~{est_tok} tok 输入）"
+    return st, text_flat
+
+def strip_thinking(body):
+    """nothink 模式：剥掉请求级思考参数"""
+    if mode() != "nothink" or not body:
+        return body
+    try:
+        d = json.loads(body)
+        if isinstance(d, dict):
+            for k in ("reasoning_effort", "reasoning_budget", "thinking", "enable_thinking"):
+                d.pop(k, None)
+            ctk = d.pop("chat_template_kwargs", None)
+            if isinstance(ctk, dict):
+                ctk.pop("enable_thinking", None)
+                ctk.pop("thinking", None)
+                if ctk:
+                    d["chat_template_kwargs"] = ctk
+            return json.dumps(d, ensure_ascii=False).encode("utf-8")
+    except Exception:
+        pass
+    return body
+
+def handle_sse_line(line, out_txt, st):
+    """解析一行 SSE，累积内容并更新当前状态 st['cur']"""
     if not line.startswith("data: ") or line[6:] == "[DONE]":
         return
     try:
@@ -24,28 +89,44 @@ def handle_sse_line(line, out_txt):
     if d.get("type") == "content_block_start":
         blk = d.get("content_block") or {}
         if blk.get("type") == "tool_use":
+            st["cur"] = f"● 工具调用中 [{blk.get('name', 'tool')}]"
             out_txt.append(f"\n[{blk.get('name','tool')}] ")
     elif d.get("type") == "content_block_delta":
         delta = d.get("delta") or {}
         dt = delta.get("type")
-        if dt == "input_json_delta":          # Anthropic 工具参数流（写文件/代码在这里）
+        if dt == "input_json_delta":
+            st["cur"] = "● 写入参数中（代码/文件内容）"
             out_txt.append(delta.get("partial_json") or "")
         elif dt == "text_delta":
+            st["cur"] = "● 输出文字中"
             out_txt.append(delta.get("text") or "")
         elif dt == "thinking_delta":
+            st["cur"] = "● 思考中"
             out_txt.append(delta.get("thinking") or "")
         else:
-            out_txt.append(delta.get("text") or delta.get("thinking") or "")
+            t = delta.get("text")
+            if t:
+                st["cur"] = "● 输出文字中"
+                out_txt.append(t)
+            elif delta.get("thinking"):
+                st["cur"] = "● 思考中"
+                out_txt.append(delta["thinking"])
     elif d.get("object") == "chat.completion.chunk":
         for ch in d.get("choices") or []:
             m = ch.get("delta") or {}
-            out_txt.append(m.get("content") or m.get("reasoning_content") or "")
-            # OpenAI 工具调用参数流
+            if m.get("reasoning_content"):
+                st["cur"] = "● 思考中"
+                out_txt.append(m["reasoning_content"])
+            elif m.get("content"):
+                st["cur"] = "● 输出文字中"
+                out_txt.append(m["content"])
             for tc in m.get("tool_calls") or []:
                 fn = tc.get("function") or {}
                 if fn.get("name"):
+                    st["cur"] = f"● 工具调用中 [{fn['name']}]"
                     out_txt.append(f"\n[{fn['name']}] ")
                 if fn.get("arguments"):
+                    st["cur"] = "● 写入参数中（代码/文件内容）"
                     out_txt.append(fn["arguments"])
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -57,28 +138,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _relay(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
-        # nothink 模式下剥掉请求级思考参数（客户端可覆盖服务端默认，代理层焊死）
-        try:
-            with open(r"E:\working\llama-cpp\llama-b11139\server-mode.txt", encoding="utf-8") as f:
-                mode = f.read().strip()
-        except OSError:
-            mode = "think"
-        if mode == "nothink" and body:
+        is_chat = "/chat/completions" in self.path or "/messages" in self.path
+        # 请求阶段：状态预判（填充/读图/压缩）写 live 区
+        if is_chat and body:
             try:
-                d = json.loads(body)
-                if isinstance(d, dict):
-                    for k in ("reasoning_effort", "reasoning_budget", "thinking", "enable_thinking"):
-                        d.pop(k, None)
-                    ctk = d.pop("chat_template_kwargs", None)
-                    if isinstance(ctk, dict):
-                        ctk.pop("enable_thinking", None)
-                        ctk.pop("thinking", None)
-                        if ctk:
-                            d["chat_template_kwargs"] = ctk
-                    body = json.dumps(d, ensure_ascii=False).encode("utf-8")
-                    self.headers.replace_header("Content-Length", str(len(body)))
+                d0 = json.loads(body)
+                st_line, preview = classify_request(d0)
+                write_live(st_line + ("\n" + preview[:300] if preview else ""))
             except Exception:
                 pass
+        body = strip_thinking(body)
         headers = {k: v for k, v in self.headers.items() if k.lower() != "host"}
         req = urllib.request.Request(UPSTREAM + self.path, data=body if body else None,
                                      headers=headers, method=self.command)
@@ -99,13 +168,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
 
-        is_chat = "/chat/completions" in self.path or "/messages" in self.path
         raw_buf, sse_buf, out_txt, t0 = [], [], [], time.time()
+        st = {"cur": ""}   # 当前解码状态
         last_flush = 0.0
-        def flush_live(force=False):
+        def flush_live():
             nonlocal last_flush
-            if out_txt and (force or time.time() - last_flush > 0.15):
-                write_live("".join(out_txt))
+            if time.time() - last_flush > 0.15:
+                head = st["cur"] + "\n" if st["cur"] else ""
+                write_live(head + "".join(out_txt))
                 last_flush = time.time()
         while True:
             chunk = up.read(1024)
@@ -118,15 +188,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if is_chat:
                 raw_buf.append(chunk)
                 if stream:
-                    # 跨块按行切分，1KB 读边界会切碎 JSON 行
                     sse_buf.append(chunk)
                     text = b"".join(sse_buf).decode("utf-8", "ignore")
                     lines = text.split("\n")
                     tail = lines.pop()
                     sse_buf[:] = [tail.encode()] if tail else []
                     for line in lines:
-                        handle_sse_line(line.strip(), out_txt)
-                    flush_live()  # 流式中实时落盘（150ms 节流）
+                        handle_sse_line(line.strip(), out_txt, st)
+                    flush_live()
         if stream:
             self.wfile.write(b"0\r\n\r\n")
         if is_chat and not stream and raw_buf:
@@ -142,7 +211,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
         txt = "".join(out_txt)
         if txt:
-            write_live(txt)
+            write_live((st["cur"] + "\n" if st["cur"] else "") + txt)
         try:
             with open(USAGE, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"ts": time.time(), "path": self.path, "stream": stream,
