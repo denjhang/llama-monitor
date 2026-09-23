@@ -1,0 +1,14 @@
+{"ts": 1790186425.2051167, "path": "/health", "stream": false, "ms": 1, "out_chars": 0, "usage": {}}
+{"ts": 1790186425.2237773, "path": "/v1/models", "stream": false, "ms": 1, "out_chars": 0, "usage": {}}
+{"ts": 1790186425.4070687, "path": "/slots", "stream": false, "ms": 0, "out_chars": 0, "usage": {}}
+{"ts": 1790186425.4406395, "path": "/slots", "stream": false, "ms": 0, "out_chars": 0, "usage": {}}
+{"ts": 1790186428.0886343, "path": "/health", "stream": false, "ms": 1, "out_chars": 0, "usage": {}}
+{"ts": 1790186433.9282975, "path": "/health", "stream": false, "ms": 0, "out_chars": 0, "usage": {}}
+{"ts": 1790186433.960853, "path": "/v1/models", "stream": false, "ms": 1, "out_chars": 0, "usage": {}}
+{"ts": 1790186434.1156979, "path": "/slots", "stream": false, "ms": 1, "out_chars": 0, "usage": {}}
+{"ts": 1790186434.1626556, "path": "/slots", "stream": false, "ms": 0, "out_chars": 0, "usage": {}}
+{"ts": 1790186438.7271726, "path": "/v1/chat/completions", "stream": true, "ms": 2064, "out_chars": 25, "usage": {}}
+{"ts": 1790186442.6973214, "path": "/health", "stream": false, "ms": 1, "out_chars": 0, "usage": {}}
+{"ts": 1790186442.7122416, "path": "/v1/models", "stream": false, "ms": 0, "out_chars": 0, "usage": {}}
+{"ts": 1790186442.8668377, "path": "/slots", "stream": false, "ms": 1, "out_chars": 0, "usage": {}}
+{"ts": 1790186442.913488, "path": "/slots", "stream": false, "ms": 1, "out_chars": 0, "usage": {}}

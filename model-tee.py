@@ -148,7 +148,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
         body = strip_thinking(body)
-        headers = {k: v for k, v in self.headers.items() if k.lower() != "host"}
+        # 剥参后 body 变长，原 Content-Length 必须丢弃，urllib 会按新 data 自动重设
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
         req = urllib.request.Request(UPSTREAM + self.path, data=body if body else None,
                                      headers=headers, method=self.command)
         try:
