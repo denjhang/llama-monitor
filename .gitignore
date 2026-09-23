@@ -1,0 +1,16 @@
+*.exe
+*.dll
+*.gguf
+*.zip
+*.log
+*.png
+*.dmp
+__pycache__/
+crash-snapshots/
+monitor-gui-cfg.json
+swaptest-filler.txt
+final_test.log
+bisect*.log
+ftllm*.log
+baseline*.log
+llama-b11139/
