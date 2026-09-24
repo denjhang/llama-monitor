@@ -21,9 +21,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 PORTS = {
     "8080 · 主链路（代理→27B）": ("http://127.0.0.1:8080", r"E:\working\llama-cpp\llama-b11139\llama-server.log"),
     "8082 · 27B 直连":           ("http://127.0.0.1:8082", r"E:\working\llama-cpp\llama-b11139\llama-server.log"),
-    "8083 · MiniCPM5-2B":        ("http://127.0.0.1:8083", r"E:\LM\small-8083.log"),
-    "8084 · Spark-X2.5-4B":      ("http://127.0.0.1:8084", r"E:\LM\small-8084.log"),
-    "8085 · Spark-X2.5-1.7B":    ("http://127.0.0.1:8085", r"E:\LM\small-8085.log"),
+    "8083 · MiniCPM5-2B-heretic微调":        ("http://127.0.0.1:8083", r"E:\LM\small-8083.log"),
+    "8084 · Spark-4B(备用)":      ("http://127.0.0.1:8084", r"E:\LM\small-8084.log"),
+    "8085 · MiniCPM5-1B-Fable5微调":    ("http://127.0.0.1:8085", r"E:\LM\small-8085.log"),
 }
 ENDPOINT   = PORTS["8080 · 主链路（代理→27B）"][0]
 SERVER_LOG = PORTS["8080 · 主链路（代理→27B）"][1]
@@ -68,6 +68,14 @@ def log_tail(n=400):
             return f.readlines()[-n:]
     except OSError:
         return []
+
+def last_speed():
+    """日志里最近一条 n_gen 的瞬时速度（跨任务）"""
+    for l in reversed(log_tail(80)):
+        m = NGEN_RE.search(l)
+        if m:
+            return float(m.group(4))
+    return None
 
 def live_gen(task_id):
     for l in reversed(log_tail(30)):
@@ -605,7 +613,12 @@ class Win(QMainWindow):
         self.v_up.setText(f"{h}h{m:02d}m")
         self.v_ctx.setText(f"{pct}%")
         lg = live_gen(slots0.get("id_task")) if proc else None
-        self.v_spd.setText(f"{lg[2]:.0f}" if lg else "—")
+        if lg:
+            self.v_spd.setText(f"{lg[2]:.0f}")
+        else:
+            # 空闲时显示最近一次速度（·=历史值）
+            last = last_speed()
+            self.v_spd.setText(f"{last:.0f}·" if last else "—")
         reqs = d["reqs"]
         acc = [r["acc"] for r in reqs if r.get("acc") is not None]
         self.v_dft.setText(f"{sum(acc)/len(acc):.2f}" if acc else "—")
