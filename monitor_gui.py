@@ -483,10 +483,32 @@ class Win(QMainWindow):
             sb = self.txt_live.verticalScrollBar(); sb.setValue(sb.maximum())
 
     # ---------- 渲染 ----------
+    def _autoswitch(self):
+        """所选端口死亡时，自动切到其他存活端口（有活口才切）"""
+        alive = []
+        for name, (url, log) in PORTS.items():
+            if url == ENDPOINT:
+                continue
+            try:
+                with urllib.request.urlopen(url + "/health", timeout=1.5) as r:
+                    if r.status == 200:
+                        alive.append(name)
+            except Exception:
+                pass
+        if alive:
+            target = alive[0]
+            self.cmb_port.blockSignals(True)
+            self.cmb_port.setCurrentText(target)
+            self.cmb_port.blockSignals(False)
+            self.on_port_changed(target)
+            self._toast(f"↔ 目标端口已死，自动切换到 {target}")
+
     def refresh(self):
         d = self.data
         if not d:
             return
+        if not (d.get("health")):
+            self._autoswitch()
         self.lb_clock.setText(datetime.datetime.now().strftime("%m-%d %H:%M:%S"))
         self.lb_model.setText(d["model"])
         self.lb_think.setText("思考 开" if d["mode"] == "think" else "思考 关")
