@@ -29,6 +29,26 @@ def mode():
     except OSError:
         return "think"
 
+def _flatten(c):
+    """content 可能是 str 或 [{type:...}] 块列表，统一拍平成纯文本"""
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        parts = []
+        for x in c:
+            if isinstance(x, dict):
+                t = x.get("type")
+                if t == "text" or "text" in x:
+                    parts.append(x.get("text", ""))
+                elif t in ("image_url", "image"):
+                    parts.append("[图片]")
+                elif t == "tool_result":
+                    parts.append("[工具结果] " + _flatten(x.get("content")))
+                elif t == "tool_use":
+                    parts.append("[调用工具 %s] %s" % (x.get("name"), x.get("input")))
+        return " ".join(parts)
+    return str(c)
+
 def classify_request(d):
     """请求进来时判定：读图/压缩/普通填充，返回（状态行, 预览文本）"""
     msgs = d.get("messages") or []
@@ -53,13 +73,26 @@ def classify_request(d):
     is_compact = any(k in all_text.lower() for k in COMPACT_KEYS)
     text_flat = " ".join(text.split())
     est_tok = len(text_flat) // 2
+    # 轮次与角色分布：让"填充的是什么"一目了然
+    roles, total_chars = {}, 0
+    for m in msgs:
+        r = m.get("role") or "?"
+        roles[r] = roles.get(r, 0) + 1
+        total_chars += len(_flatten(m.get("content")) or "")
+    dist = " / ".join(f"{r}×{n}" for r, n in roles.items())
+    est_all = total_chars // 2
     if is_compact:
-        st = f"● 压缩中（上下文整理，~{est_tok} tok 输入）"
+        st = f"● 压缩中（上下文整理，~{est_tok} tok 新输入 / 全history ~{est_all} tok，{len(msgs)} 条消息）"
     elif has_image:
-        st = f"● 读图中（多模态嵌入 + 预填充，~{est_tok} tok 文本）"
+        st = f"● 读图中（多模态嵌入 + 预填充，~{est_tok} tok 文本 / 全history ~{est_all} tok，{len(msgs)} 条消息）"
     else:
-        st = f"● 填充中（~{est_tok} tok 输入）"
-    return st, text_flat
+        st = f"● 填充中（~{est_tok} tok 新输入 / 全history ~{est_all} tok，{len(msgs)} 条消息）"
+    # 最新一条非 assistant 消息的长预览（agent 循环里通常是 tool 结果）
+    last_in = next((m for m in reversed(msgs) if m.get("role") != "assistant"), None)
+    lines = [f"— 消息分布: {dist}"]
+    if last_in is not None:
+        lines.append(f"— 最新[{last_in.get('role')}]: " + _flatten(last_in.get("content"))[:1500])
+    return st, text_flat + "\n" + "\n".join(lines)
 
 def strip_thinking(body):
     """nothink 模式：剥掉请求级思考参数"""
@@ -149,7 +182,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 d0 = json.loads(body)
                 st_line, preview = classify_request(d0)
-                write_live(st_line + ("\n" + preview[:300] if preview else ""))
+                write_live(st_line + ("\n" + preview[:2000] if preview else ""))
             except Exception:
                 pass
         body = strip_thinking(body)

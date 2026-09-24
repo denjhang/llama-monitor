@@ -19,14 +19,14 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 
 # 可监控端口表：url + 各自日志（小模型日志在 E:\LM\small-<端口>.log）
 PORTS = {
-    "8080 · 主链路（代理→27B）": ("http://127.0.0.1:8080", r"E:\working\llama-cpp\llama-b11139\llama-server.log"),
-    "8082 · 27B 直连":           ("http://127.0.0.1:8082", r"E:\working\llama-cpp\llama-b11139\llama-server.log"),
-    "8083 · MiniCPM5-2B-heretic微调":        ("http://127.0.0.1:8083", r"E:\LM\small-8083.log"),
-    "8084 · Spark-4B(备用)":      ("http://127.0.0.1:8084", r"E:\LM\small-8084.log"),
-    "8085 · MiniCPM5-1B-Fable5微调":    ("http://127.0.0.1:8085", r"E:\LM\small-8085.log"),
+    "8080 · 主链路": ("http://127.0.0.1:8080", r"E:\working\llama-cpp\llama-b11139\llama-server.log", "对外入口（代理→8082）"),
+    "8082 · 27B": ("http://127.0.0.1:8082", r"E:\working\llama-cpp\llama-b11139\llama-server.log", "直连（真实服务）"),
+    "8083 · MiniCPM5-2B-heretic微调":        ("http://127.0.0.1:8083", r"E:\LM\small-8083.log", "直连（真实服务）"),
+    "8084 · Spark-4B(备用)":      ("http://127.0.0.1:8084", r"E:\LM\small-8084.log", "直连（真实服务）"),
+    "8085 · MiniCPM5-1B-Fable5微调":    ("http://127.0.0.1:8085", r"E:\LM\small-8085.log", "直连（真实服务）"),
 }
-ENDPOINT   = PORTS["8080 · 主链路（代理→27B）"][0]
-SERVER_LOG = PORTS["8080 · 主链路（代理→27B）"][1]
+ENDPOINT   = PORTS["8080 · 主链路"][0]
+SERVER_LOG = PORTS["8080 · 主链路"][1]
 LIVE_FILE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
 LIVE_FILE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
 EVENTS_LOG = r"E:\working\llama-cpp\llama\watchdog-events.log"
@@ -199,7 +199,7 @@ def collect():
     d["up"] = uptime()
     # 全端口普查：每个端口的存活 + 模型名
     ports_stat = []
-    for name, (url, log) in PORTS.items():
+    for name, (url, log, role) in PORTS.items():
         ok, mid = False, ""
         try:
             with urllib.request.urlopen(url + "/health", timeout=1.5) as r:
@@ -213,7 +213,7 @@ def collect():
                     mid = os.path.basename(mm["data"][0]["id"]) if mm.get("data") else ""
             except Exception:
                 pass
-        ports_stat.append({"name": name, "alive": ok, "model": mid})
+        ports_stat.append({"name": name, "alive": ok, "model": mid, "role": role})
     d["ports_stat"] = ports_stat
     try:
         d["mode"] = open(MODE_FILE, encoding="utf-8").read().strip()
@@ -281,8 +281,8 @@ class Win(QMainWindow):
         # 监控目标列表（仿 model-gateway：端口+模型+状态，点击切换；在线排最上）
         tgt, tv = self._card()
         cap = QLabel("监控目标（点击切换，在线优先排序）"); cap.setProperty("class", "cap"); tv.addWidget(cap)
-        self.tbl_ports = QTableWidget(0, 3)
-        self.tbl_ports.setHorizontalHeaderLabels(["端口", "模型", "状态"])
+        self.tbl_ports = QTableWidget(0, 4)
+        self.tbl_ports.setHorizontalHeaderLabels(["端口", "属性", "模型", "状态"])
         self.tbl_ports.verticalHeader().setVisible(False)
         self.tbl_ports.verticalHeader().setDefaultSectionSize(22)
         self.tbl_ports.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -308,24 +308,26 @@ class Win(QMainWindow):
             kpis.addWidget(t, stretch=1)
         col.addLayout(kpis)
 
-        # 阶段卡：两条大进度条
-        phase, pv = self._card()
+        # 上下文 + 实时生成 合并卡：左窄条=两条进度条，右宽区=实时输出（整体高度给足）
+        merged, mv = self._card()
+        h = QHBoxLayout()
+        left = QVBoxLayout()
         self.ctx_row,  self.ctx_lab,  self.bar_ctx  = bar_row("上下文")
         self.phase_row, self.phase_lab, self.bar_phase = bar_row("阶段（预填充 / 解码）")
-        for r in (self.ctx_row, self.phase_row):
-            pv.addWidget(r)
-        col.addWidget(phase)
-
-        # 实时生成
-        live, lv = self._card()
-        h = QHBoxLayout()
+        left.addWidget(self.ctx_row); left.addWidget(self.phase_row); left.addStretch(1)
+        left_w = QWidget(); left_w.setLayout(left); left_w.setFixedWidth(230)
+        right = QVBoxLayout()
+        hr = QHBoxLayout()
         cap = QLabel("实时生成 · 含工具调用与代码"); cap.setProperty("class", "cap")
         self.lb_phase_inline = QLabel(""); self.lb_phase_inline.setProperty("class", "dim")
-        h.addWidget(cap); h.addStretch(1); h.addWidget(self.lb_phase_inline)
-        lv.addLayout(h)
-        self.txt_live = QTextEdit(); self.txt_live.setReadOnly(True); self.txt_live.setFixedHeight(52)
-        lv.addWidget(self.txt_live)
-        col.addWidget(live)
+        hr.addWidget(cap); hr.addStretch(1); hr.addWidget(self.lb_phase_inline)
+        right.addLayout(hr)
+        self.txt_live = QTextEdit(); self.txt_live.setReadOnly(True)
+        self.txt_live.setMinimumHeight(200)   # 保底高度，缩小三行给请求表让位
+        right.addWidget(self.txt_live)
+        h.addWidget(left_w); h.addLayout(right, 1)
+        mv.addLayout(h)
+        col.addWidget(merged, 3)
 
         # 请求表
         tbl, tbv = self._card()
@@ -339,6 +341,7 @@ class Win(QMainWindow):
         hh = self.table.horizontalHeader(); hh.setSectionResizeMode(QHeaderView.Stretch)
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         tbv.addWidget(self.table)
+        self.table.setMinimumHeight(4 * 19 + 30)   # 至少完整显示四行 + 表头
         col.addWidget(tbl, stretch=1)
 
         # 底部：狗状态条（胶囊 + 结构化小项）
@@ -451,7 +454,7 @@ class Win(QMainWindow):
 
     def on_port_changed(self, text):
         global ENDPOINT, SERVER_LOG
-        ENDPOINT, SERVER_LOG = PORTS[text]
+        ENDPOINT, SERVER_LOG, _role = PORTS[text]
         self.data = {}   # 立即重采
         try:
             self.txt_live.setPlainText("")
@@ -538,10 +541,10 @@ class Win(QMainWindow):
             pass
 
     def _live_file(self):
-        """按当前端口选 live 文件：主链路用老路径，小模型用 E:\LM\live-<端口>.txt"""
+        """按当前端口选 live 文件：8080/8082 主链路同源，都读 E:\LM\live-8080.txt"""
         port = ENDPOINT.rsplit(":", 1)[-1]
         if port in ("8080", "8082"):
-            return LIVE_FILE
+            return r"E:\LM\live-8080.txt"
         return rf"E:\LM\live-{port}.txt"
 
     def fast_live(self):
@@ -579,10 +582,11 @@ class Win(QMainWindow):
             port_short = p["name"].split(" · ")[0]
             it0 = QTableWidgetItem(port_short)
             it0.setData(Qt.UserRole, p["name"])
-            it1 = QTableWidgetItem(p["model"] or "-")
-            it2 = QTableWidgetItem("● 在线" if p["alive"] else "○ 离线")
-            it2.setForeground(Qt.green if p["alive"] else Qt.gray)
-            for j, it in enumerate((it0, it1, it2)):
+            it1 = QTableWidgetItem(p.get("role") or "-")
+            it2 = QTableWidgetItem(p["model"] or "-")
+            it3 = QTableWidgetItem("● 在线" if p["alive"] else "○ 离线")
+            it3.setForeground(Qt.green if p["alive"] else Qt.gray)
+            for j, it in enumerate((it0, it1, it2, it3)):
                 self.tbl_ports.setItem(i, j, it)
         cur = self._cur_port_row()
         if cur >= 0:
