@@ -315,7 +315,7 @@ class Win(QMainWindow):
         self.lb_phase_inline = QLabel(""); self.lb_phase_inline.setProperty("class", "dim")
         h.addWidget(cap); h.addStretch(1); h.addWidget(self.lb_phase_inline)
         lv.addLayout(h)
-        self.txt_live = QTextEdit(); self.txt_live.setReadOnly(True); self.txt_live.setFixedHeight(96)
+        self.txt_live = QTextEdit(); self.txt_live.setReadOnly(True); self.txt_live.setFixedHeight(52)
         lv.addWidget(self.txt_live)
         col.addWidget(live)
 
