@@ -15,10 +15,19 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QLabel, QProgressBar, QTableWidget,
                                QTableWidgetItem, QHeaderView, QFrame, QTextEdit,
                                QSizePolicy, QGridLayout, QPushButton, QDialog,
-                               QRubberBand)
+                               QRubberBand, QComboBox, QCheckBox)
 
-ENDPOINT   = "http://127.0.0.1:8080"
-SERVER_LOG = r"E:\working\llama-cpp\llama-b11139\llama-server.log"
+# 可监控端口表：url + 各自日志（小模型日志在 E:\LM\small-<端口>.log）
+PORTS = {
+    "8080 · 主链路（代理→27B）": ("http://127.0.0.1:8080", r"E:\working\llama-cpp\llama-b11139\llama-server.log"),
+    "8082 · 27B 直连":           ("http://127.0.0.1:8082", r"E:\working\llama-cpp\llama-b11139\llama-server.log"),
+    "8083 · MiniCPM5-2B":        ("http://127.0.0.1:8083", r"E:\LM\small-8083.log"),
+    "8084 · Spark-X2.5-4B":      ("http://127.0.0.1:8084", r"E:\LM\small-8084.log"),
+    "8085 · Spark-X2.5-1.7B":    ("http://127.0.0.1:8085", r"E:\LM\small-8085.log"),
+}
+ENDPOINT   = PORTS["8080 · 主链路（代理→27B）"][0]
+SERVER_LOG = PORTS["8080 · 主链路（代理→27B）"][1]
+LIVE_FILE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
 LIVE_FILE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
 EVENTS_LOG = r"E:\working\llama-cpp\llama\watchdog-events.log"
 MODE_FILE  = r"E:\working\llama-cpp\llama-b11139\server-mode.txt"
@@ -376,6 +385,15 @@ class Win(QMainWindow):
             QGuiApplication.clipboard().setText(text)
             self._toast(f"✓ 框选内容已复制（{len(items)} 项文字，Ctrl+V 粘贴）")
 
+    def on_port_changed(self, text):
+        global ENDPOINT, SERVER_LOG
+        ENDPOINT, SERVER_LOG = PORTS[text]
+        self.data = {}   # 立即重采
+        try:
+            self.txt_live.setPlainText("")
+        except Exception:
+            pass
+
     # ---------- 持久化 ----------
     def load_geometry(self):
         try:
@@ -425,13 +443,16 @@ class Win(QMainWindow):
         while True:
             try:
                 d = collect()
-                if self.was_running is True and d["running"] is False:
-                    restart_server()
-                    self._log_evt("GUI auto-restart triggered")
-                proxy_ok = bool(d["health"])
-                if self.was_proxy is True and not proxy_ok and d["running"]:
-                    restart_proxy()
-                    self._log_evt("GUI proxy-restart triggered")
+                revive = self.chk_revive.isChecked() if hasattr(self, "chk_revive") else False
+                main_link = ENDPOINT.endswith(":8080") or ENDPOINT.endswith(":8082")
+                if revive and main_link:
+                    if self.was_running is True and d["running"] is False:
+                        restart_server()
+                        self._log_evt("GUI auto-restart triggered (revive ON)")
+                    proxy_ok = bool(d["health"])
+                    if self.was_proxy is True and not proxy_ok and d["running"] and ENDPOINT.endswith(":8080"):
+                        restart_proxy()
+                        self._log_evt("GUI proxy-restart triggered (revive ON)")
                 self.was_proxy = proxy_ok
                 self.was_running = d["running"]
                 self.data = d
@@ -448,6 +469,8 @@ class Win(QMainWindow):
             pass
 
     def fast_live(self):
+        if not (ENDPOINT.endswith(":8080") or ENDPOINT.endswith(":8082")):
+            return  # 直连小模型无代理，不截获内容
         try:
             txt = open(LIVE_FILE, encoding="utf-8").read()
         except OSError:
