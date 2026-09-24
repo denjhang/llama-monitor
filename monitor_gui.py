@@ -282,7 +282,8 @@ class Win(QMainWindow):
         ph = self.tbl_ports.horizontalHeader(); ph.setSectionResizeMode(QHeaderView.Stretch)
         ph.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         ph.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.tbl_ports.setMinimumHeight(5 * 22 + 34)   # 至少完整五行的空间
+        # 不锁高度：窗口够高显示五行，不够自动出滚动条
+        self.tbl_ports.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.tbl_ports.cellClicked.connect(self._pick_port)
         tv.addWidget(self.tbl_ports)
         col.addWidget(tgt)
