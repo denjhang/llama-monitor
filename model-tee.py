@@ -163,13 +163,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(502, str(e))
             return
         self.send_response(up.status)
-        for k, v in up.headers.items():
-            if k.lower() in ("transfer-encoding", "content-length", "connection"):
-                continue
-            self.send_header(k, v)
         stream = "text/event-stream" in (up.headers.get("Content-Type") or "")
+        up_len = up.headers.get("Content-Length")
+        for k, v in up.headers.items():
+            if k.lower() in ("transfer-encoding", "connection"):
+                continue
+            # 流式由我们重新分块；非流式必须原样透传 Content-Length，
+            # 否则 keep-alive 客户端（Zcode 等）会永久挂起等响应结束
+            if k.lower() == "content-length" and not stream:
+                self.send_header(k, v)
+            elif k.lower() != "content-length":
+                self.send_header(k, v)
         if stream:
             self.send_header("Transfer-Encoding", "chunked")
+        else:
+            self.send_header("Connection", "close")
         self.end_headers()
 
         raw_buf, sse_buf, out_txt, t0 = [], [], [], time.time()
