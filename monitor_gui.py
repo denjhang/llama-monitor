@@ -270,22 +270,19 @@ class Win(QMainWindow):
         head.addWidget(self.lb_think); head.addWidget(self.lb_health); head.addWidget(self.lb_clock)
         col.addLayout(head)
 
-        # 监控目标列表（仿 model-gateway：端口+模型+状态，点击切换）
+        # 监控目标列表（仿 model-gateway：端口+模型+状态，点击切换；在线排最上）
         tgt, tv = self._card()
-        cap = QLabel("监控目标（点击切换）"); cap.setProperty("class", "cap"); tv.addWidget(cap)
-        self.tbl_ports = QTableWidget(len(PORTS), 3)
+        cap = QLabel("监控目标（点击切换，在线优先排序）"); cap.setProperty("class", "cap"); tv.addWidget(cap)
+        self.tbl_ports = QTableWidget(0, 3)
         self.tbl_ports.setHorizontalHeaderLabels(["端口", "模型", "状态"])
         self.tbl_ports.verticalHeader().setVisible(False)
-        self.tbl_ports.verticalHeader().setDefaultSectionSize(20)
+        self.tbl_ports.verticalHeader().setDefaultSectionSize(22)
         self.tbl_ports.setEditTriggers(QTableWidget.NoEditTriggers)
         self.tbl_ports.setSelectionBehavior(QTableWidget.SelectRows)
         ph = self.tbl_ports.horizontalHeader(); ph.setSectionResizeMode(QHeaderView.Stretch)
         ph.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.tbl_ports.setMaximumHeight(20 * len(PORTS) + 40)
-        for i, name in enumerate(PORTS):
-            it = QTableWidgetItem(name.split(" · ")[0]); self.tbl_ports.setItem(i, 0, it)
-            self.tbl_ports.setItem(i, 1, QTableWidgetItem("…"))
-            self.tbl_ports.setItem(i, 2, QTableWidgetItem("·"))
+        ph.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tbl_ports.setMinimumHeight(5 * 22 + 34)   # 至少完整五行的空间
         self.tbl_ports.cellClicked.connect(self._pick_port)
         tv.addWidget(self.tbl_ports)
         col.addWidget(tgt)
@@ -427,13 +424,21 @@ class Win(QMainWindow):
             self._toast(f"✓ 框选内容已复制（{len(items)} 项文字，Ctrl+V 粘贴）")
 
     def _pick_port(self, row, col):
-        """点击端口表切换监控目标"""
-        name = list(PORTS.keys())[row]
-        self.on_port_changed(name)
-        self._toast(f"→ 已切换监控目标：{name}")
+        """点击端口表切换监控目标（行数据带端口名）"""
+        it = self.tbl_ports.item(row, 0)
+        if it is None:
+            return
+        name = it.data(Qt.UserRole)
+        if name and name in PORTS:
+            self.on_port_changed(name)
+            self._toast(f"→ 已切换监控目标：{name}")
 
     def _cur_port_row(self):
-        return list(PORTS.keys()).index(next((k for k, v in PORTS.items() if v[0] == ENDPOINT), list(PORTS)[0]))
+        for r in range(self.tbl_ports.rowCount()):
+            it = self.tbl_ports.item(r, 0)
+            if it and PORTS.get(it.data(Qt.UserRole), (None,))[0] == ENDPOINT:
+                return r
+        return -1
 
     def on_port_changed(self, text):
         global ENDPOINT, SERVER_LOG
@@ -547,17 +552,22 @@ class Win(QMainWindow):
             return
         if not (d.get("health")):
             self._autoswitch(d.get("ports_stat") or [])
-        # 端口表刷新（状态+模型名，高亮当前目标）
-        cur_row = self._cur_port_row()
-        for i, p in enumerate(d.get("ports_stat") or []):
-            mitem = self.tbl_ports.item(i, 1)
-            if mitem and p["model"] and mitem.text() != p["model"]:
-                mitem.setText(p["model"])
-            sitem = self.tbl_ports.item(i, 2)
-            if sitem:
-                sitem.setText("● 在线" if p["alive"] else "○ 离线")
-                sitem.setForeground(Qt.green if p["alive"] else Qt.gray)
-        self.tbl_ports.selectRow(cur_row)
+        # 端口表整表重建：在线排最上，模型名/状态每秒写实
+        stat = d.get("ports_stat") or []
+        stat_sorted = sorted(stat, key=lambda p: 0 if p["alive"] else 1)
+        self.tbl_ports.setRowCount(len(stat_sorted))
+        for i, p in enumerate(stat_sorted):
+            port_short = p["name"].split(" · ")[0]
+            it0 = QTableWidgetItem(port_short)
+            it0.setData(Qt.UserRole, p["name"])
+            it1 = QTableWidgetItem(p["model"] or "-")
+            it2 = QTableWidgetItem("● 在线" if p["alive"] else "○ 离线")
+            it2.setForeground(Qt.green if p["alive"] else Qt.gray)
+            for j, it in enumerate((it0, it1, it2)):
+                self.tbl_ports.setItem(i, j, it)
+        cur = self._cur_port_row()
+        if cur >= 0:
+            self.tbl_ports.selectRow(cur)
         self.lb_clock.setText(datetime.datetime.now().strftime("%m-%d %H:%M:%S"))
         self.lb_model.setText(d["model"])
         self.lb_think.setText("思考 开" if d["mode"] == "think" else "思考 关")
