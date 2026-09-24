@@ -68,8 +68,10 @@ def strip_thinking(body):
     try:
         d = json.loads(body)
         if isinstance(d, dict):
-            for k in ("reasoning_effort", "reasoning_budget", "thinking", "enable_thinking"):
+            for k in ("reasoning_budget", "thinking", "enable_thinking"):
                 d.pop(k, None)
+            # 不是删 effort 而是强制 none：某些模板(3.5系)只有它能压思考
+            d["reasoning_effort"] = "none"
             ctk = d.pop("chat_template_kwargs", None)
             if isinstance(ctk, dict):
                 ctk.pop("enable_thinking", None)
