@@ -282,8 +282,8 @@ class Win(QMainWindow):
         ph = self.tbl_ports.horizontalHeader(); ph.setSectionResizeMode(QHeaderView.Stretch)
         ph.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         ph.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        # 不锁高度：窗口够高显示五行，不够自动出滚动条
-        self.tbl_ports.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # 固定三行高：在线的排最上所以前三行就是重点，其余靠滚动条
+        self.tbl_ports.setFixedHeight(3 * 22 + 32)
         self.tbl_ports.cellClicked.connect(self._pick_port)
         tv.addWidget(self.tbl_ports)
         col.addWidget(tgt)
