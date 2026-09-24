@@ -500,19 +500,24 @@ class Win(QMainWindow):
                 d = collect()
                 revive = self.chk_revive.isChecked() if hasattr(self, "chk_revive") else False
                 main_link = ENDPOINT.endswith(":8080") or ENDPOINT.endswith(":8082")
+                proxy_ok = bool(d["health"])
                 if revive and main_link:
                     if self.was_running is True and d["running"] is False:
                         restart_server()
                         self._log_evt("GUI auto-restart triggered (revive ON)")
-                    proxy_ok = bool(d["health"])
                     if self.was_proxy is True and not proxy_ok and d["running"] and ENDPOINT.endswith(":8080"):
                         restart_proxy()
                         self._log_evt("GUI proxy-restart triggered (revive ON)")
                 self.was_proxy = proxy_ok
                 self.was_running = d["running"]
                 self.data = d
-            except Exception:
-                pass
+            except Exception as e:
+                import traceback
+                try:
+                    with open(r"E:\LM\gui-errors.log", "a", encoding="utf-8") as f:
+                        f.write(traceback.format_exc() + "\n")
+                except Exception:
+                    pass
             time.sleep(1)
 
     def _log_evt(self, msg):
