@@ -673,7 +673,11 @@ class Win(QMainWindow):
             self.lb_toast.setText("")
 
 if __name__ == "__main__":
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("llama.monitor.gui")  # 任务栏图标独立生效
     app = QApplication(sys.argv)
     app.setStyleSheet(load_qss())
+    from PySide6.QtGui import QIcon
+    app.setWindowIcon(QIcon(r"E:\working\llama-cpp\llama\llama-monitor.ico"))
     w = Win(); w.show()
     sys.exit(app.exec())
