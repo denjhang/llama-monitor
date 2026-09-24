@@ -8,9 +8,12 @@
 """
 import http.server, json, os, time, urllib.request, urllib.error
 
-UPSTREAM = "http://127.0.0.1:8082"
-LIVE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
-USAGE = r"E:\working\llama-cpp\llama-b11139\tee-usage.jsonl"
+import sys as _sys
+_args = _sys.argv[1:]
+LISTEN   = _args[0] if len(_args) > 0 else "8080"
+UPSTREAM = "http://127.0.0.1:" + (_args[1] if len(_args) > 1 else "8082")
+LIVE  = rf"E:\LM\live-{LISTEN}.txt" if _args else r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
+USAGE = rf"E:\LM\tee-usage-{LISTEN}.jsonl" if _args else r"E:\working\llama-cpp\llama-b11139\tee-usage.jsonl"
 MODE_FILE = r"E:\working\llama-cpp\llama-b11139\server-mode.txt"
 
 COMPACT_KEYS = ("summarize the conversation", "conversation summary", "compact",
@@ -228,4 +231,4 @@ class TS(http.server.ThreadingHTTPServer):
 
 if __name__ == "__main__":
     write_live("")
-    TS(("127.0.0.1", 8080), Handler).serve_forever()
+    TS(("127.0.0.1", int(LISTEN)), Handler).serve_forever()

@@ -529,11 +529,16 @@ class Win(QMainWindow):
         except OSError:
             pass
 
+    def _live_file(self):
+        """按当前端口选 live 文件：主链路用老路径，小模型用 E:\LM\live-<端口>.txt"""
+        port = ENDPOINT.rsplit(":", 1)[-1]
+        if port in ("8080", "8082"):
+            return LIVE_FILE
+        return rf"E:\LM\live-{port}.txt"
+
     def fast_live(self):
-        if not (ENDPOINT.endswith(":8080") or ENDPOINT.endswith(":8082")):
-            return  # 直连小模型无代理，不截获内容
         try:
-            txt = open(LIVE_FILE, encoding="utf-8").read()
+            txt = open(self._live_file(), encoding="utf-8").read()
         except OSError:
             return
         txt = txt.replace("\\n", "\n").replace("\\t", "  ")
