@@ -189,6 +189,24 @@ def collect():
     d["err"] = last_error()
     d["deaths"] = death_stats()
     d["up"] = uptime()
+    # 全端口普查：每个端口的存活 + 模型名
+    ports_stat = []
+    for name, (url, log) in PORTS.items():
+        ok, mid = False, ""
+        try:
+            with urllib.request.urlopen(url + "/health", timeout=1.5) as r:
+                ok = (r.status == 200)
+        except Exception:
+            pass
+        if ok:
+            try:
+                with urllib.request.urlopen(url + "/v1/models", timeout=1.5) as r:
+                    mm = json.load(r)
+                    mid = os.path.basename(mm["data"][0]["id"]) if mm.get("data") else ""
+            except Exception:
+                pass
+        ports_stat.append({"name": name, "alive": ok, "model": mid})
+    d["ports_stat"] = ports_stat
     try:
         d["mode"] = open(MODE_FILE, encoding="utf-8").read().strip()
     except OSError:
@@ -252,6 +270,26 @@ class Win(QMainWindow):
         head.addWidget(self.lb_think); head.addWidget(self.lb_health); head.addWidget(self.lb_clock)
         col.addLayout(head)
 
+        # 监控目标列表（仿 model-gateway：端口+模型+状态，点击切换）
+        tgt, tv = self._card()
+        cap = QLabel("监控目标（点击切换）"); cap.setProperty("class", "cap"); tv.addWidget(cap)
+        self.tbl_ports = QTableWidget(len(PORTS), 3)
+        self.tbl_ports.setHorizontalHeaderLabels(["端口", "模型", "状态"])
+        self.tbl_ports.verticalHeader().setVisible(False)
+        self.tbl_ports.verticalHeader().setDefaultSectionSize(20)
+        self.tbl_ports.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.tbl_ports.setSelectionBehavior(QTableWidget.SelectRows)
+        ph = self.tbl_ports.horizontalHeader(); ph.setSectionResizeMode(QHeaderView.Stretch)
+        ph.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tbl_ports.setMaximumHeight(20 * len(PORTS) + 40)
+        for i, name in enumerate(PORTS):
+            it = QTableWidgetItem(name.split(" · ")[0]); self.tbl_ports.setItem(i, 0, it)
+            self.tbl_ports.setItem(i, 1, QTableWidgetItem("…"))
+            self.tbl_ports.setItem(i, 2, QTableWidgetItem("·"))
+        self.tbl_ports.cellClicked.connect(self._pick_port)
+        tv.addWidget(self.tbl_ports)
+        col.addWidget(tgt)
+
         # KPI 瓷砖行（6 块）
         kpis = QHBoxLayout(); kpis.setSpacing(8)
         self.t_up,  self.v_up  = kpi_tile("存活时间")
@@ -300,6 +338,9 @@ class Win(QMainWindow):
         # 底部：狗状态条（胶囊 + 结构化小项）
         dogcard, dv = self._card()
         dh = QHBoxLayout(); dh.setSpacing(14)
+        self.chk_revive = QCheckBox("复活狗（勾选才自动拉活）")
+        self.chk_revive.setChecked(False)
+        dh.addWidget(self.chk_revive)
         self.lb_dog = QLabel("看门狗"); self.lb_dog.setProperty("class", "dog")
         dh.addWidget(self.lb_dog)
         def stat(cap):
@@ -384,6 +425,15 @@ class Win(QMainWindow):
         if text:
             QGuiApplication.clipboard().setText(text)
             self._toast(f"✓ 框选内容已复制（{len(items)} 项文字，Ctrl+V 粘贴）")
+
+    def _pick_port(self, row, col):
+        """点击端口表切换监控目标"""
+        name = list(PORTS.keys())[row]
+        self.on_port_changed(name)
+        self._toast(f"→ 已切换监控目标：{name}")
+
+    def _cur_port_row(self):
+        return list(PORTS.keys()).index(next((k for k, v in PORTS.items() if v[0] == ENDPOINT), list(PORTS)[0]))
 
     def on_port_changed(self, text):
         global ENDPOINT, SERVER_LOG
@@ -483,23 +533,11 @@ class Win(QMainWindow):
             sb = self.txt_live.verticalScrollBar(); sb.setValue(sb.maximum())
 
     # ---------- 渲染 ----------
-    def _autoswitch(self):
+    def _autoswitch(self, ports_stat):
         """所选端口死亡时，自动切到其他存活端口（有活口才切）"""
-        alive = []
-        for name, (url, log) in PORTS.items():
-            if url == ENDPOINT:
-                continue
-            try:
-                with urllib.request.urlopen(url + "/health", timeout=1.5) as r:
-                    if r.status == 200:
-                        alive.append(name)
-            except Exception:
-                pass
+        alive = [p["name"] for p in ports_stat if p["alive"] and PORTS[p["name"]][0] != ENDPOINT]
         if alive:
             target = alive[0]
-            self.cmb_port.blockSignals(True)
-            self.cmb_port.setCurrentText(target)
-            self.cmb_port.blockSignals(False)
             self.on_port_changed(target)
             self._toast(f"↔ 目标端口已死，自动切换到 {target}")
 
@@ -508,7 +546,18 @@ class Win(QMainWindow):
         if not d:
             return
         if not (d.get("health")):
-            self._autoswitch()
+            self._autoswitch(d.get("ports_stat") or [])
+        # 端口表刷新（状态+模型名，高亮当前目标）
+        cur_row = self._cur_port_row()
+        for i, p in enumerate(d.get("ports_stat") or []):
+            mitem = self.tbl_ports.item(i, 1)
+            if mitem and p["model"] and mitem.text() != p["model"]:
+                mitem.setText(p["model"])
+            sitem = self.tbl_ports.item(i, 2)
+            if sitem:
+                sitem.setText("● 在线" if p["alive"] else "○ 离线")
+                sitem.setForeground(Qt.green if p["alive"] else Qt.gray)
+        self.tbl_ports.selectRow(cur_row)
         self.lb_clock.setText(datetime.datetime.now().strftime("%m-%d %H:%M:%S"))
         self.lb_model.setText(d["model"])
         self.lb_think.setText("思考 开" if d["mode"] == "think" else "思考 关")
