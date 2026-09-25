@@ -86,6 +86,8 @@ SGLANG_PORTS = {"8092"}
 _port_cache = {}
 # 端口连续失败计数：只有连续失败才写入离线缓存（防单次抖动误判）
 _port_fail = {}
+# 预填充进度分母冻结：本次预填开场以来最大的 已填+剩余（≈prompt 总长），离开预填清零
+_PREFILL_STATE = {"total": 0}
 
 def is_sglang(model_info=None):
     """8092 tee 直连 SGLang；8080 网关在其后端是 SGLang 时也按 SGLang 解析
@@ -237,9 +239,17 @@ def sglang_stats():
                 break                 # 空闲心跳行 = 本次请求起点
             acc += nt
         out["prefill_acc"] = acc
-        total = acc + out.get("pending_tok", 0)
-        if total > 0:
-            out["used"] = total
+        # 分母必须冻结：acc+pending 若每秒重算，会随 pending 缩水而缩水，
+        # 导致进度条早早冲到 ~100% 而 token 还在涨（2026-09-26 用户报障）。
+        # 冻结为本次预填开场以来见过的最大 acc+pending（≈prompt 总长），离开预填时清零。
+        total_now = acc + out.get("pending_tok", 0)
+        if total_now > _PREFILL_STATE["total"]:
+            _PREFILL_STATE["total"] = total_now
+        out["prefill_total"] = _PREFILL_STATE["total"] or total_now
+        if out["prefill_total"] > 0:
+            out["used"] = out["prefill_total"]
+    else:
+        _PREFILL_STATE["total"] = 0
     if out["last_ts"] is None:
         out["err"] = ""
     return out
@@ -1085,11 +1095,10 @@ class Win(QMainWindow):
                 self.phase_lab.setText(f"解码生成  {fmt_k(sgst.get('used') or 0)} tok @ {sgst['tps']:.0f} tok/s（接受率 {sgst.get('acc_rate') or 0:.2f}）")
                 self.lb_phase_inline.setText(f"解码中 {fmt_k(sgst.get('used') or 0)} tok @ {sgst['tps']:.0f} t/s")
             elif phase == "prefill":
-                # 预填充进度：与 llama.cpp 同款「百分比（已处理 / 总长 tok）」显示
+                # 预填充进度：分母用冻结的 prefill_total（开场最大 已填+剩余 ≈ prompt 总长）
                 done = sgst.get("prefill_acc") or 0
-                pend = sgst.get("pending_tok") or 0
-                tot = done + pend
-                p_pct = 100 * done // tot if tot > 0 else 30
+                tot = sgst.get("prefill_total") or (done + (sgst.get("pending_tok") or 0))
+                p_pct = int(100 * done / tot) if tot > 0 else 30
                 self.bar_phase.setValue(max(5, min(99, p_pct)))
                 ptps = sgst.get("prefill_tps")
                 tp = f" @ {ptps:.0f} tok/s" if ptps else ""
