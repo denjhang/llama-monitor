@@ -280,9 +280,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # 剥参后 body 变长，原 Content-Length 必须丢弃，urllib 会按新 data 自动重设
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
         port = pick_upstream(body)
-        # 上游要鉴权（SGLang --api-key）时替客户端补上；客户端已带则不覆盖
-        if port in UPSTREAM_KEYS and not any(k.lower() == "authorization" for k in headers):
+        # 网关是唯一鉴权边界：后端要 key 时一律用网关自己的 key 覆盖客户端传来的
+        # （客户端填什么 key 都行——填 123 也行；不能把客户端的 key 原样转发，否则被后端 401）
+        if port in UPSTREAM_KEYS:
+            # Authorization（OpenAI 协议）与 x-api-key（Anthropic 协议）都要覆盖
+            for k in [k for k in headers if k.lower() in ("authorization", "x-api-key")]:
+                headers.pop(k)
             headers["Authorization"] = "Bearer " + UPSTREAM_KEYS[port]
+            headers["x-api-key"] = UPSTREAM_KEYS[port]
         url = "http://127.0.0.1:%d" % port + self.path
         req = urllib.request.Request(url, data=body if body else None,
                                      headers=headers, method=self.command)
