@@ -246,15 +246,15 @@ def sglang_stats():
 
 def recent_requests_sglang(n=50):
     """SGLang /health 探针每 3s 一条涌进 usage 文件，尾 50 行全是 health，
-    —— 导致 n=50 条全是探测行、被全跳过 → 请求表"基本空"。
-    修法：反向扫文件，凑够 n 条真实推理再停（上限 3000 行防 OOM）。"""
+    原取尾 50 行→全过滤→表空。改为反向扫凑够 n 条真实推理。
+    结果：最新优先（GUI 首行高亮=最新任务）。"""
     port = ENDPOINT.rsplit(":", 1)[-1]
     usage_file = r"E:\LM\tee-usage-8080.jsonl" if port == "8080" else r"E:\LM\sglang-usage.jsonl"
     rows = []
     try:
         with open(usage_file, encoding="utf-8") as f:
             lines = f.readlines()
-        # 反向扫，只收 chat/messages 行，凑够 n 条
+        # 反向扫（最新→最旧），凑够 n 条 chat/messages 行
         for l in reversed(lines):
             if len(rows) >= n:
                 break
@@ -264,14 +264,14 @@ def recent_requests_sglang(n=50):
             if "chat/completions" not in l and "/messages" not in l:
                 continue
             try:
-                rows.insert(0, json.loads(l))   # 保持时间正序
+                rows.append(json.loads(l))      # append = 最新先入，保持最新优先
             except Exception:
                 continue
     except OSError:
         pass
 
     out = []
-    for u in rows:   # 已是正序，无需 reversed
+    for u in rows:   # 最新优先
         el = u.get("elapsed") or (u.get("ms") / 1000 if u.get("ms") else None)
         out.append({
             "id": u.get("ts") or "-",

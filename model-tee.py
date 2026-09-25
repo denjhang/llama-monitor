@@ -170,13 +170,16 @@ def strip_thinking(body, path=""):
     return body
 
 def handle_sse_line(line, out_txt, st):
-    """解析一行 SSE，累积内容并更新当前状态 st['cur']"""
+    """解析一行 SSE，累积内容并更新当前状态 st['cur']。
+    同时抓用法统计（OpenAI 的 usage.chunk / Anthropic 的 message_stop.usage）。
+    注意：不靠正则从 raw string 抓 JSON——直接从已解析 dict 里拿。"""
     if not line.startswith("data: ") or line[6:] == "[DONE]":
         return
     try:
         d = json.loads(line[6:])
     except json.JSONDecodeError:
         return
+    # --- 一般增量输出（文字/思考/工具调用）---
     if d.get("type") == "content_block_start":
         blk = d.get("content_block") or {}
         if blk.get("type") == "tool_use":
@@ -219,6 +222,20 @@ def handle_sse_line(line, out_txt, st):
                 if fn.get("arguments"):
                     st["cur"] = "● 写入参数中（代码/文件内容）"
                     out_txt.append(fn["arguments"])
+    # --- 用法统计：已解析 JSON → 直接从 dict 取（不靠正则从 raw 字符串抠）---
+    # Anthropic 的 usage 分两个事件（实测 SGLang）：
+    #   message_start → message.usage.input_tokens（输入）
+    #   message_delta → usage.output_tokens（输出）
+    if d.get("type") == "message_start":
+        mu = (d.get("message") or {}).get("usage")
+        if isinstance(mu, dict):
+            st.setdefault("usage", {}).update(mu)
+    if d.get("type") == "message_delta" and isinstance(d.get("usage"), dict):
+        st.setdefault("usage", {}).update(d["usage"])
+    # OpenAI: usage 顶层（stream with include_usage 最后 chunk 带）
+    if isinstance(d.get("usage"), dict) and d.get("type") not in ("message_start", "message_delta"):
+        st["usage"] = d["usage"]
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -364,13 +381,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     sse_buf[:] = [tail.encode()] if tail else []
                     for line in lines:
                         handle_sse_line(line.strip(), out_txt, st)
-                        # 抓 SSE 里的 usage（SGLang 在最后一个 chunk 带 usage）
-                        mu = re.search(r'"usage"\s*:\s*(\{[^{}]*\})', line)
-                        if mu:
-                            try:
-                                st["usage"] = json.loads(mu.group(1))
-                            except Exception:
-                                pass
                     flush_live()
         if stream:
             self.wfile.write(b"0\r\n\r\n")
@@ -396,9 +406,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                "code": 200, "elapsed": round(elapsed, 2), "ms": int(elapsed * 1000),
                "out_chars": len(txt)}
         u = st.get("usage") or {}
+        # OpenAI 用 prompt_tokens/completion_tokens；Anthropic 用 input_tokens/output_tokens
         for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
             if u.get(k) is not None:
                 rec[k] = u[k]
+        if u.get("input_tokens") is not None:
+            rec["prompt_tokens"] = u["input_tokens"]
+        if u.get("output_tokens") is not None:
+            rec["completion_tokens"] = u["output_tokens"]
+        if "total_tokens" not in rec:
+            pi = rec.get("prompt_tokens"); ci = rec.get("completion_tokens")
+            if pi is not None and ci is not None:
+                rec["total_tokens"] = pi + ci
         ct = rec.get("completion_tokens")
         if ct and elapsed > 0:
             rec["tps"] = round(ct / elapsed, 2)
