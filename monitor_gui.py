@@ -347,11 +347,27 @@ def live_gen(task_id):
     return None
 
 def recent_requests(n=50):
+    """task 编号对人没用——改为显示该 task 首次出现在日志里的时刻（时分秒）。
+    llama.cpp 日志行首时间戳是运行时长（HH.MM.SS.mmm 的 uptime），减去服务启动时刻得墙钟时间。"""
     reqs, order = {}, []
+    up_base = uptime() or 0   # 服务已运行秒数 → 启动墙钟 = now - up
+    import time as _t
+    boot = _t.time() - up_base
     for l in log_tail(600):
         m = REQ_RE.search(l)
         if m and m.group(1) not in reqs:
-            reqs[m.group(1)] = {"pt": int(m.group(2))}; order.append(m.group(1))
+            tid = m.group(1)
+            reqs[tid] = {"pt": int(m.group(2))}; order.append(tid)
+            tm = re.match(r"(\d+)\.(\d+)\.(\d+)\.(\d+)\s", l.strip())
+            # llama.cpp 行首 uptime = 分.秒.毫秒.微秒（实测 304.47.401.656 = 5h04m47.4s）：
+            # 右起微秒/毫秒/秒，前导一段=分钟、两段=小时+分钟
+            if tm:
+                lead = tm.groups()
+                extra = int(lead[0]) * 60
+                if len(lead) > 4:
+                    extra = int(lead[0]) * 3600 + int(lead[1]) * 60
+                secs = extra + int(lead[-3]) + int(lead[-2]) / 1000.0
+                reqs[tid]["ts"] = _t.strftime("%H:%M:%S", _t.localtime(boot + secs))
         m = GEN_RE.search(l)
         if m:
             r = reqs.setdefault(m.group(1), {})
@@ -368,7 +384,8 @@ def recent_requests(n=50):
     out = []
     for t in reversed(order[-n:]):
         r = reqs.get(t, {})
-        r.setdefault("pt", None); r.setdefault("ct", None); r["id"] = t
+        r.setdefault("pt", None); r.setdefault("ct", None)
+        r["id"] = r.get("ts") or t
         out.append(r)
     return out
 
