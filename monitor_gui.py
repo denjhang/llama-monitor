@@ -82,8 +82,10 @@ SG_ERR     = re.compile(r"ERROR|Traceback|CUDA out of memory")
 
 SGLANG_PORTS = {"8092"}
 
-# 端口存活缓存：{name: (alive, ts)}。离线端口 60s 内跳过探测（死端口延迟拒绝 ~2s 拖慢 collect）
+# 端口存活缓存：{name: (alive, ts)}。连续 2 次失败的端口 60s 内跳过探测（死端口延迟拒绝 ~2s 拖慢 collect）
 _port_cache = {}
+# 端口连续失败计数：只有连续失败才写入离线缓存（防单次抖动误判）
+_port_fail = {}
 
 def is_sglang(model_info=None):
     """8092 tee 直连 SGLang；8080 网关在其后端是 SGLang 时也按 SGLang 解析
@@ -413,7 +415,8 @@ def collect():
         return {"name": name, "alive": ok, "model": mid, "role": role}
 
     # 离线端口缓存：死端口连接被延迟拒绝（Windows ~2s），每轮都探会把 collect 拖到 4s。
-    # 活端口每轮照探；离线端口 60s 内跳过（省掉超时等待）。
+    # 活端口每轮照探；仅【连续 2 次失败】才缓存为离线 60s（单次超时多是瞬时抖动，
+    # 若一次失败就锁 60s，会把活端口误标离线整整一分钟）。
     now = time.time()
 
     def probe_cached(item):
@@ -422,7 +425,15 @@ def collect():
         if last is not None and last[0] is False and now - last[1] < 60:
             return {"name": name, "alive": False, "model": "", "role": role, "_cached": True}
         r = probe_one(item)
-        _port_cache[name] = (r["alive"], now)
+        if r["alive"]:
+            _port_cache[name] = (True, now)
+            _port_fail[name] = 0
+        else:
+            # 失败计数：连续 2 次才写离线缓存
+            prev_fail = _port_fail.get(name, 0) + 1
+            _port_fail[name] = prev_fail
+            if prev_fail >= 2:
+                _port_cache[name] = (False, now)
         return r
 
     ports_stat = []
@@ -474,6 +485,13 @@ def fmt_k(n):
     n = int(n)
     return f"{n/1000:.1f}K" if n >= 1000 else str(n)
 
+def fmt_gb(mib):
+    """显存 MiB → GB（nvidia-smi 返回 MiB）"""
+    try:
+        return f"{int(mib)/1024:.1f}G"
+    except (TypeError, ValueError):
+        return "-"
+
 def kpi_tile(caption):
     """大数字 KPI 瓷砖：标题在上（小灰字），数值在下（大字）"""
     f = QFrame(); f.setProperty("class", "tile")
@@ -492,6 +510,18 @@ def bar_row(title):
     bar = QProgressBar(); bar.setTextVisible(False)
     v.addWidget(lab); v.addWidget(bar)
     return w, lab, bar
+
+def vram_row(title):
+    """带标题 + 右侧数值的进度条行（显存条：标题含温度，右侧显示 已用/总量 与百分比）"""
+    w = QWidget()
+    v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
+    hr = QHBoxLayout(); hr.setContentsMargins(0, 0, 0, 0)
+    lab = QLabel(title); lab.setProperty("class", "cap")
+    val = QLabel(""); val.setProperty("class", "dim")
+    hr.addWidget(lab); hr.addStretch(1); hr.addWidget(val)
+    bar = QProgressBar(); bar.setTextVisible(False)
+    v.addLayout(hr); v.addWidget(bar)
+    return w, lab, val, bar
 
 class Win(QMainWindow):
     def __init__(self):
@@ -561,7 +591,13 @@ class Win(QMainWindow):
         left = QVBoxLayout()
         self.ctx_row,  self.ctx_lab,  self.bar_ctx  = bar_row("上下文")
         self.phase_row, self.phase_lab, self.bar_phase = bar_row("阶段（预填充 / 解码）")
-        left.addWidget(self.ctx_row); left.addWidget(self.phase_row); left.addStretch(1)
+        left.addWidget(self.ctx_row); left.addWidget(self.phase_row)
+        # 两条显存条（GPU0/GPU1）：标题含温度，右侧显示 已用/总量 (百分比)
+        self.vm0_row, self.vm0_lab, self.vm0_val, self.bar_vm0 = vram_row("GPU 0 显存")
+        self.vm1_row, self.vm1_lab, self.vm1_val, self.bar_vm1 = vram_row("GPU 1 显存")
+        left.addSpacing(6)
+        left.addWidget(self.vm0_row); left.addWidget(self.vm1_row)
+        left.addStretch(1)
         left_w = QWidget(); left_w.setLayout(left); left_w.setFixedWidth(230)
         right = QVBoxLayout()
         hr = QHBoxLayout()
@@ -901,6 +937,20 @@ class Win(QMainWindow):
             self.v_g1.setText(f"{g[1]['temp']}°C")
         elif len(g) == 1:
             self.v_g0.setText(f"{g[0]['temp']}°C")
+        # 显存条：标题带温度，右侧 已用/总量 (百分比)，条长=占用率
+        for row_i, (lab, val, bar) in enumerate(
+                ((self.vm0_lab, self.vm0_val, self.bar_vm0),
+                 (self.vm1_lab, self.vm1_val, self.bar_vm1))):
+            if row_i < len(g):
+                gp = g[row_i]
+                pctv = 100 * gp["used"] // max(gp["tot"], 1)
+                lab.setText(f"GPU {gp['i']} 显存 · {gp['temp']}°C")
+                val.setText(f"{fmt_gb(gp['used'])} / {fmt_gb(gp['tot'])}  ({pctv}%)")
+                bar.setValue(pctv)
+            else:
+                lab.setText(f"GPU {row_i} 显存 · —")
+                val.setText("—")
+                bar.setValue(0)
 
         # 进度条
         if sg:
