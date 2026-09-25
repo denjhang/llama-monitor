@@ -127,24 +127,44 @@ def pick_upstream(body):
     return DEFAULT_PORT
 
 
-def strip_thinking(body):
-    """nothink 模式：剥掉请求级思考参数"""
+def strip_thinking(body, path=""):
+    """nothink 模式：在网关层强制关闭思考（协议感知）。
+
+    实测（2026-09-25，SGLang Qwen3.8）：
+      - OpenAI /v1/chat/completions：`chat_template_kwargs.enable_thinking=false` 有效（reasoning=0）
+      - Anthropic /v1/messages：只有 `thinking.type=disabled` 有效；
+        传 chat_template_kwargs.enable_thinking=false 会被忽略（reasoning 仍 1362 字符）
+    所以必须按协议注入对应字段，且要覆盖客户端传的值（客户端选"思考关"未必发对参数）。"""
     if mode() != "nothink" or not body:
         return body
     try:
         d = json.loads(body)
-        if isinstance(d, dict):
-            for k in ("reasoning_budget", "thinking", "enable_thinking"):
+        if not isinstance(d, dict):
+            return body
+        is_anthropic = "/messages" in path
+        if is_anthropic:
+            # Anthropic：删掉 OpenAI 风格字段，强制 thinking.type=disabled
+            for k in ("reasoning_budget", "enable_thinking", "reasoning_effort"):
                 d.pop(k, None)
-            # 不是删 effort 而是强制 none：某些模板(3.5系)只有它能压思考
-            d["reasoning_effort"] = "none"
-            ctk = d.pop("chat_template_kwargs", None)
+            d["thinking"] = {"type": "disabled"}
+            ctk = d.get("chat_template_kwargs")
             if isinstance(ctk, dict):
                 ctk.pop("enable_thinking", None)
                 ctk.pop("thinking", None)
-                if ctk:
-                    d["chat_template_kwargs"] = ctk
-            return json.dumps(d, ensure_ascii=False).encode("utf-8")
+                if not ctk:
+                    d.pop("chat_template_kwargs", None)
+        else:
+            # OpenAI：强制 chat_template_kwargs.enable_thinking=false
+            for k in ("reasoning_budget", "thinking", "enable_thinking"):
+                d.pop(k, None)
+            d.pop("reasoning_effort", None)
+            ctk = d.get("chat_template_kwargs")
+            if not isinstance(ctk, dict):
+                ctk = {}
+            ctk["enable_thinking"] = False
+            ctk.pop("thinking", None)
+            d["chat_template_kwargs"] = ctk
+        return json.dumps(d, ensure_ascii=False).encode("utf-8")
     except Exception:
         pass
     return body
@@ -277,7 +297,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 write_live(st_line + ("\n" + preview[:2000] if preview else ""))
             except Exception:
                 pass
-        body = strip_thinking(body)
+        body = strip_thinking(body, self.path)
         # 剥参后 body 变长，原 Content-Length 必须丢弃，urllib 会按新 data 自动重设
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
         port = pick_upstream(body)
