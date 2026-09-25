@@ -10,11 +10,30 @@ import http.server, json, os, time, urllib.request, urllib.error
 
 import sys as _sys
 _args = _sys.argv[1:]
-LISTEN   = _args[0] if len(_args) > 0 else "8080"
-UPSTREAM = "http://127.0.0.1:" + (_args[1] if len(_args) > 1 else "8082")
+LISTEN = _args[0] if _args else "8080"
+# 统一网关：单参=按模型名路由（8080），双参=旧语义 LISTEN UPSTREAM 单上游
+if len(_args) >= 2:
+    ROUTES = [("", int(_args[1]))]          # "" 恒匹配 → 全部转发该上游
+    DEFAULT_PORT = int(_args[1])
+else:
+    ROUTES = [("lfm", 8083), ("ministral", 8084)]   # 模型名关键词 → 端口
+    # 默认上游 = 27B（llama.cpp / SGLang 都在 8082，二者互斥）；可用 TEE_DEFAULT_PORT 覆盖
+    DEFAULT_PORT = int(os.environ.get("TEE_DEFAULT_PORT", "8082"))
+GATEWAY = len(_args) == 1   # 单参启动 = 网关（多后端按 model 路由 + /v1/models 聚合）
+PORT_NAMES = {8082: "27b", 8083: "lfm", 8084: "ministral"}
+# 对外绑定：网关默认 0.0.0.0（局域网可直连），单上游保持回环；均可用 TEE_HOST 覆盖
+TEE_HOST = os.environ.get("TEE_HOST") or ("0.0.0.0" if GATEWAY else "127.0.0.1")
+# 上游需要的鉴权 token：SGLang 用 --api-key，网关替客户端补上（key=端口）
+UPSTREAM_KEYS = {8082: os.environ.get("SGLANG_API_KEY", "local-key")}
+# 死端口黑名单（端口 -> 解禁时间戳）：连接被延迟拒绝~2s 的端口 5 分钟内不再探测
+_dead_ports = {}
 LIVE  = rf"E:\LM\live-{LISTEN}.txt" if _args else r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
 USAGE = rf"E:\LM\tee-usage-{LISTEN}.jsonl" if _args else r"E:\working\llama-cpp\llama-b11139\tee-usage.jsonl"
 MODE_FILE = r"E:\working\llama-cpp\llama-b11139\server-mode.txt"
+# 自身出站请求一律绕过系统代理（Clash 等会劫持 127.0.0.1 导致超时）
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_orig_urlopen = urllib.request.urlopen
+urllib.request.urlopen = lambda req, *a, **k: _opener.open(req, *a, **k)
 
 COMPACT_KEYS = ("summarize the conversation", "conversation summary", "compact",
                 "历史对话", "压缩", "总结以上对话", "生成摘要")
@@ -93,6 +112,20 @@ def classify_request(d):
     if last_in is not None:
         lines.append(f"— 最新[{last_in.get('role')}]: " + _flatten(last_in.get("content"))[:1500])
     return st, text_flat + "\n" + "\n".join(lines)
+
+def pick_upstream(body):
+    """按请求体 model 字段关键词路由；无 body/未知关键词走默认"""
+    if body:
+        try:
+            d0 = json.loads(body)
+            m = (d0.get("model") or "").lower()
+        except Exception:
+            m = ""
+        for kw, port in ROUTES:
+            if kw and kw in m:
+                return port
+    return DEFAULT_PORT
+
 
 def strip_thinking(body):
     """nothink 模式：剥掉请求级思考参数"""
@@ -173,9 +206,67 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _serve_models(self):
+        """网关模式：并发拉取所有后端 /v1/models 合并去重。
+        死端口（连接被延迟拒绝~2s）记入黑名单 30s，重复调用即时返回。"""
+        import urllib.request as ur
+        import concurrent.futures as cf
+
+        def fetch(port):
+            try:
+                hdrs = {}
+                if port in UPSTREAM_KEYS:
+                    hdrs["Authorization"] = "Bearer " + UPSTREAM_KEYS[port]
+                req = ur.Request("http://127.0.0.1:%d/v1/models" % port, headers=hdrs)
+                with ur.urlopen(req, timeout=1.0) as r:
+                    d = json.loads(r.read().decode("utf-8", "ignore"))
+                    return d.get("data") or d.get("models") or []
+            except Exception:
+                return []
+
+        now = time.time()
+        all_ports = list(dict.fromkeys([p for _, p in ROUTES] + [DEFAULT_PORT]))
+        ports = [p for p in all_ports if _dead_ports.get(p, 0) < now]
+        merged = []
+        ex = cf.ThreadPoolExecutor(max_workers=max(len(ports), 1))
+        try:
+            futs = {ex.submit(fetch, p): p for p in ports}
+            try:
+                for fut in cf.as_completed(futs, timeout=0.5):
+                    port = futs[fut]
+                    part = fut.result()
+                    if part:
+                        merged.extend(part)
+                        _dead_ports.pop(port, None)
+                    else:
+                        _dead_ports[port] = now + 300
+            except cf.TimeoutError:
+                for fut, port in futs.items():
+                    if not fut.done():
+                        _dead_ports[port] = now + 300   # 超时未回 = 死端口
+        finally:
+            ex.shutdown(wait=False)
+        seen = {}
+        for m in merged:
+            mid = m.get("id") or m.get("name") or ""
+            if mid and mid not in seen:
+                seen[mid] = m
+        payload = {"object": "list", "data": list(seen.values())}
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _relay(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
+        # 网关模式：/v1/models 聚合所有后端模型列表
+        if GATEWAY and self.path.rstrip("/") == "/v1/models":
+            self._serve_models()
+            return
         is_chat = "/chat/completions" in self.path or "/messages" in self.path
         # 请求阶段：状态预判（填充/读图/压缩）写 live 区
         if is_chat and body:
@@ -188,7 +279,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = strip_thinking(body)
         # 剥参后 body 变长，原 Content-Length 必须丢弃，urllib 会按新 data 自动重设
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
-        req = urllib.request.Request(UPSTREAM + self.path, data=body if body else None,
+        port = pick_upstream(body)
+        # 上游要鉴权（SGLang --api-key）时替客户端补上；客户端已带则不覆盖
+        if port in UPSTREAM_KEYS and not any(k.lower() == "authorization" for k in headers):
+            headers["Authorization"] = "Bearer " + UPSTREAM_KEYS[port]
+        url = "http://127.0.0.1:%d" % port + self.path
+        req = urllib.request.Request(url, data=body if body else None,
                                      headers=headers, method=self.command)
         try:
             up = urllib.request.urlopen(req, timeout=600)
@@ -274,4 +370,5 @@ class TS(http.server.ThreadingHTTPServer):
 
 if __name__ == "__main__":
     write_live("")
-    TS(("127.0.0.1", int(LISTEN)), Handler).serve_forever()
+    print("model-tee %s -> 默认 %d, 路由 %s (bind %s)" % (LISTEN, DEFAULT_PORT, ROUTES, TEE_HOST), flush=True)
+    TS((TEE_HOST, int(LISTEN)), Handler).serve_forever()
