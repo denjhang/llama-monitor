@@ -245,18 +245,24 @@ def sglang_stats():
     return out
 
 def recent_requests_sglang(n=50):
-    """SGLang /health 探针每 3s 一条涌进 usage 文件，尾 50 行全是 health，
-    原取尾 50 行→全过滤→表空。改为反向扫凑够 n 条真实推理。
-    结果：最新优先（GUI 首行高亮=最新任务）。"""
-    port = ENDPOINT.rsplit(":", 1)[-1]
-    usage_file = r"E:\LM\tee-usage-8080.jsonl" if port == "8080" else r"E:\LM\sglang-usage.jsonl"
+    """合并全部 usage 流水（8080 网关 / 8092 直连 / 旧 sglang-usage），
+    按时间倒序取真实推理行。流量走哪个代理就写哪个文件，
+    监控看哪个端口都应看到同一份真实流量。"""
+    usage_files = [
+        r"E:\LM\tee-usage-8080.jsonl",
+        r"E:\LM\tee-usage-8092.jsonl",
+        r"E:\LM\sglang-usage.jsonl",
+    ]
     rows = []
-    try:
-        with open(usage_file, encoding="utf-8") as f:
-            lines = f.readlines()
-        # 反向扫（最新→最旧），凑够 n 条 chat/messages 行
+    for usage_file in usage_files:
+        try:
+            with open(usage_file, encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        got = 0
         for l in reversed(lines):
-            if len(rows) >= n:
+            if got >= n:
                 break
             l = l.strip()
             if not l:
@@ -264,11 +270,39 @@ def recent_requests_sglang(n=50):
             if "chat/completions" not in l and "/messages" not in l:
                 continue
             try:
-                rows.append(json.loads(l))      # append = 最新先入，保持最新优先
+                u = json.loads(l)
             except Exception:
                 continue
-    except OSError:
-        pass
+            u["_src"] = usage_file
+            rows.append(u)
+            got += 1
+    # 跨文件按 ts 倒序。ts 只有 HH:MM:SS，跨午夜会把昨天排到今天前面——
+    # 以当前时刻为锚：比当前时间大 1 分钟以上的视为昨天（-24h）。
+    import time as _t
+    now_s = _t.strftime("%H:%M:%S")
+
+    def _age(u):
+        ts = u.get("ts") or ""
+        # 越小越旧→排序键越大越新；昨天的时间整体减 86400
+        sec = ((lambda h, m, s: int(h) * 3600 + int(m) * 60 + int(s))(*ts.split(":"))
+               if ts.count(":") == 2 else 0)
+        if ts > now_s and ts > "00:00:00":
+            # 仅当与 now 差得远（>60s）才算昨天，避免刚跨秒的抖动
+            nh, nm, ns = map(int, now_s.split(":"))
+            now_sec = nh * 3600 + nm * 60 + ns
+            if sec - now_sec > 60:
+                sec -= 86400
+        return sec
+
+    rows.sort(key=_age, reverse=True)
+    seen, dedup = set(), []
+    for u in rows:
+        k = (u.get("ts"), u.get("path"), u.get("prompt_tokens"), u.get("completion_tokens"))
+        if k in seen:
+            continue
+        seen.add(k)
+        dedup.append(u)
+    rows = dedup
 
     out = []
     for u in rows:   # 最新优先
