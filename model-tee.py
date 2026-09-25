@@ -6,7 +6,7 @@
 - nothink 模式下剥掉请求级思考参数（防客户端覆盖）
 - usage 流水 tee-usage.jsonl
 """
-import http.server, json, os, time, urllib.request, urllib.error
+import http.server, json, os, re, time, urllib.request, urllib.error
 
 import sys as _sys
 _args = _sys.argv[1:]
@@ -261,6 +261,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _relay(self):
+        t_req = time.time()   # 计时起点：请求一进来就记（覆盖上游等待 + 全部生成）
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
         # 网关模式：/v1/models 聚合所有后端模型列表
@@ -343,6 +344,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     sse_buf[:] = [tail.encode()] if tail else []
                     for line in lines:
                         handle_sse_line(line.strip(), out_txt, st)
+                        # 抓 SSE 里的 usage（SGLang 在最后一个 chunk 带 usage）
+                        mu = re.search(r'"usage"\s*:\s*(\{[^{}]*\})', line)
+                        if mu:
+                            try:
+                                st["usage"] = json.loads(mu.group(1))
+                            except Exception:
+                                pass
                     flush_live()
         if stream:
             self.wfile.write(b"0\r\n\r\n")
@@ -355,16 +363,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         out_txt.append(m.get("content") or "")
                     elif d.get("content"):
                         out_txt.append("".join(c.get("text", "") for c in d["content"]))
+                    if isinstance(d.get("usage"), dict):
+                        st["usage"] = d["usage"]
             except Exception:
                 pass
         txt = "".join(out_txt)
         if txt:
             write_live((st["cur"] + "\n" if st["cur"] else "") + txt)
+        # 写监控可读的 usage 记录：含真实 token 数 / ttft / tps（与 tee 格式对齐）
+        elapsed = time.time() - t_req
+        rec = {"ts": time.strftime("%H:%M:%S"), "path": self.path, "stream": stream,
+               "code": 200, "elapsed": round(elapsed, 2), "ms": int(elapsed * 1000),
+               "out_chars": len(txt)}
+        u = st.get("usage") or {}
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if u.get(k) is not None:
+                rec[k] = u[k]
+        ct = rec.get("completion_tokens")
+        if ct and elapsed > 0:
+            rec["tps"] = round(ct / elapsed, 2)
+        if not u and "text/event-stream" in (up.headers.get("Content-Type") or ""):
+            rec["code"] = 200
         try:
             with open(USAGE, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"ts": time.time(), "path": self.path, "stream": stream,
-                                    "ms": int((time.time() - t0) * 1000),
-                                    "out_chars": len(txt)}, ensure_ascii=False) + "\n")
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception:
             pass
 

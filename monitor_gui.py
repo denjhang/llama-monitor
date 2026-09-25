@@ -19,14 +19,14 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 
 # 可监控端口表：url + 各自日志（小模型日志在 E:\LM\small-<端口>.log）
 PORTS = {
-    "8080 · 主链路": ("http://127.0.0.1:8080", r"E:\working\llama-cpp\llama-b11139\llama-server.log", "对外入口（代理→8082）"),
-    "8082 · 27B": ("http://127.0.0.1:8082", r"E:\working\llama-cpp\llama-b11139\llama-server.log", "直连（真实服务）"),
-    "8083 · MiniCPM5-2B-heretic微调":        ("http://127.0.0.1:8083", r"E:\LM\small-8083.log", "直连（真实服务）"),
-    "8084 · Spark-4B(备用)":      ("http://127.0.0.1:8084", r"E:\LM\small-8084.log", "直连（真实服务）"),
+    "8080 · 统一网关": ("http://127.0.0.1:8080", r"E:\working\llama-cpp\llama-b11139\llama-server.log", "对外入口（按模型路由）"),
+    "8092 · SGLang-27B (WSL)": ("http://127.0.0.1:8092", r"\\wsl.localhost\Ubuntu-24.04\root\sglang-best.log", "WSL SGLang TP=2 补丁版"),
+    "8083 · LFM2.5-2.6B": ("http://127.0.0.1:8083", r"E:\LM\small-8183.log", "直连（真实服务）"),
+    "8084 · Ministral14B": ("http://127.0.0.1:8084", r"E:\LM\small-8184.log", "直连（真实服务）"),
     "8085 · MiniCPM5-1B-Fable5微调":    ("http://127.0.0.1:8085", r"E:\LM\small-8085.log", "直连（真实服务）"),
 }
-ENDPOINT   = PORTS["8080 · 主链路"][0]
-SERVER_LOG = PORTS["8080 · 主链路"][1]
+ENDPOINT   = PORTS["8080 · 统一网关"][0]
+SERVER_LOG = PORTS["8080 · 统一网关"][1]
 LIVE_FILE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
 LIVE_FILE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
 EVENTS_LOG = r"E:\working\llama-cpp\llama\watchdog-events.log"
@@ -54,6 +54,16 @@ def get_json(path, timeout=3):
     except Exception:
         return None
 
+# SGLang（WSL）日志与 live 源：监控 8080 网关或 8092 tee 时都指向 WSL 侧
+WSL_SGLANG_LOG = r"\\wsl.localhost\Ubuntu-24.04\root\sglang-best.log"
+
+def sg_log_path():
+    """SGLang 后端日志：8092 走 PORTS 表；8080 网关后端是 SGLang 时用 WSL 日志"""
+    port = ENDPOINT.rsplit(":", 1)[-1]
+    if port == "8080":
+        return WSL_SGLANG_LOG
+    return SERVER_LOG
+
 NGEN_RE = re.compile(r"task (\d+) \|\s+n_gen =\s+(\d+), tg =\s+([\d.]+) t/s, tg_3s =\s+([\d.]+)")
 REQ_RE  = re.compile(r"task (\d+) \|\s+prompt eval time =\s+[\d.]+ ms /\s+(\d+) tokens")
 GEN_RE  = re.compile(r"task (\d+) \|\s+eval time =\s+[\d.]+ ms /\s+(\d+) tokens \(\s+[\d.]+ ms per token,\s+([\d.]+) tokens per second\)")
@@ -61,6 +71,173 @@ ACC_RE  = re.compile(r"task (\d+) \|\s+draft acceptance = ([\d.]+)")
 TOT_RE  = re.compile(r"task (\d+) \|\s+total time =\s+([\d.]+) ms")
 STOP_RE = re.compile(r"release: id\s+\d+ \|\s+task (\d+) \|\s+stop processing: n_tokens = (\d+)")
 ERR_RE  = re.compile(r"got exception: (.{0,100})")
+
+# ---- SGLang 日志格式（与 llama.cpp 完全不同）----
+SG_DECODE  = re.compile(r"Decode batch,.*?#running-req:\s*(\d+),.*?#full token:\s*(\d+),.*?accept len:\s*([\d.]+), accept rate:\s*([\d.]+).*?gen throughput \(token/s\):\s*([\d.]+)")
+SG_PREFILL = re.compile(r"Prefill batch,.*?#new-token:\s*(\d+),.*?#running-req:\s*(\d+)")
+SG_PREFILL_TPS = re.compile(r"input throughput \(token/s\):\s*([\d.]+)")
+SG_KV      = re.compile(r"KV Cache is allocated.*?#tokens:\s*(\d+)")
+SG_TS      = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+SG_ERR     = re.compile(r"ERROR|Traceback|CUDA out of memory")
+
+SGLANG_PORTS = {"8092"}
+
+# 端口存活缓存：{name: (alive, ts)}。离线端口 60s 内跳过探测（死端口延迟拒绝 ~2s 拖慢 collect）
+_port_cache = {}
+
+def is_sglang(model_info=None):
+    """8092 tee 直连 SGLang；8080 网关在其后端是 SGLang 时也按 SGLang 解析
+    （网关 /health 同样返回 200 空 body、无 /slots，走 llama.cpp 路径必误判掉线）"""
+    port = ENDPOINT.rsplit(":", 1)[-1]
+    if port in SGLANG_PORTS:
+        return True
+    if port == "8080":
+        m = model_info if model_info is not None else get_json("/v1/models")
+        if not m:
+            return False
+        first = (m.get("data") or [{}])[0]
+        # SGLang 返回 owned_by=sglang；llama.cpp 引擎名不同
+        return str(first.get("owned_by", "")).lower() == "sglang"
+    return False
+
+def log_tail_path(path, n=400):
+    try:
+        with open(path, "r", errors="replace") as f:
+            return f.readlines()[-n:]
+    except OSError:
+        return []
+
+def sglang_stats():
+    """解析 SGLang 日志：运行中请求数 / 上下文占用 / 接受率 / 速度 / KV 池
+    注意：收尾行会出现 #full token: 0 / gen throughput: 0.2x 的空转值，
+    必须【只采信有实际 token 的行】，否则监控全是 0 和负号。"""
+    lines = log_tail_path(sg_log_path(), 2000)
+    out = {"running": 0, "used": 0, "ctx": 0, "acc_len": None, "acc_rate": None,
+           "tps": None, "queue": 0, "last_ts": None, "err": "",
+           "prefill_tps": None, "new_token": None, "last_active_ts": None}
+    # KV 池行只在服务启动时打印一次，早已滚出尾部 2000 行 → 单独扫日志头部
+    if not out["ctx"]:
+        try:
+            with open(sg_log_path(), "r", errors="replace") as f:
+                head = f.readlines()[:4000]
+            for l in head:
+                m = SG_KV.search(l)
+                if m:
+                    out["ctx"] = int(m.group(1))
+        except OSError:
+            pass
+    for l in lines:
+        m = SG_KV.search(l)
+        if m:
+            out["ctx"] = int(m.group(1))
+    # 跳过启动期无害报错
+    for l in reversed(lines):
+        if SG_ERR.search(l):
+            if any(s in l for s in ("torchcodec", "libavutil", "libtorchcodec")):
+                continue
+            out["err"] = l.strip()[:120]
+            break
+    # ---- 忙闲判定：取【最后一条 batch 行】（decode 或 prefill 都算），它的
+    # #running-req 才是当前真实并发数。只看最后一条 decode 会拿到历史残留值，
+    # 空闲时仍显示"解码中"（收尾的 Prefill batch #running-req: 0 才是真相）。----
+    last_batch_ts, last_batch_running = None, None
+    for l in reversed(lines):
+        if SG_TS.match(l) and ("Decode batch" in l or "Prefill batch" in l):
+            last_batch_ts = SG_TS.match(l).group(1)
+            md = SG_DECODE.search(l)
+            mp = SG_PREFILL.search(l)
+            if md:
+                last_batch_running = int(md.group(1))
+            elif mp:
+                last_batch_running = int(mp.group(2))
+            else:
+                mr = re.search(r"#running-req:\s*(\d+)", l)
+                last_batch_running = int(mr.group(1)) if mr else 0
+            break
+    out["last_ts"] = last_batch_ts
+    out["running"] = last_batch_running if last_batch_running is not None else 0
+    # 若最后一条 batch 行是几分钟前的，视作已空闲
+    if last_batch_ts:
+        try:
+            t_b = datetime.datetime.strptime(last_batch_ts, "%Y-%m-%d %H:%M:%S")
+            if (datetime.datetime.now() - t_b).total_seconds() > 90:
+                out["running"] = 0
+        except ValueError:
+            pass
+    # ---- 最近的 decode：只认有实际生成量的行（供速度显示）----
+    best_tps = None
+    for l in reversed(lines):
+        m = SG_DECODE.search(l)
+        if not m:
+            continue
+        running, used, alen, arate, tps = (int(m.group(1)), int(m.group(2)),
+                                           float(m.group(3)), float(m.group(4)), float(m.group(5)))
+        mt = SG_TS.match(l)
+        ts = mt.group(1) if mt else None
+        # 有效生成行：有 token 且速度像样（>1 t/s）
+        if used > 0 and tps > 1.0:
+            out["used"] = used
+            out["acc_len"] = alen
+            out["acc_rate"] = arate
+            out["tps"] = tps
+            out["last_active_ts"] = ts
+            break
+        if best_tps is None and tps > 1.0:
+            best_tps = tps
+    # 没有有效 decode 时，退回最近一次 prefill 的输入吞吐
+    for l in reversed(lines):
+        m = SG_PREFILL.search(l)
+        if m:
+            m2 = SG_PREFILL_TPS.search(l)
+            if m2:
+                out["prefill_tps"] = float(m2.group(1))
+                out["new_token"] = int(m.group(1))
+            break
+    if out["last_ts"] is None:
+        out["err"] = ""
+    return out
+
+def recent_requests_sglang(n=50):
+    """SGLang 无 per-task 日志：优先用 tee/网关的 usage 流水（含耗时/tps/真实 token 数）
+    —— 8080 网关写 tee-usage-8080.jsonl，8092 tee 写 sglang-usage.jsonl"""
+    port = ENDPOINT.rsplit(":", 1)[-1]
+    usage_file = r"E:\LM\tee-usage-8080.jsonl" if port == "8080" else r"E:\LM\sglang-usage.jsonl"
+    rows = []
+    try:
+        with open(usage_file, encoding="utf-8") as f:
+            for l in f.readlines()[-n:]:
+                l = l.strip()
+                if not l:
+                    continue
+                try:
+                    rows.append(json.loads(l))
+                except Exception:
+                    continue
+    except OSError:
+        pass
+
+    out = []
+    for u in reversed(rows):
+        # 跳过探测请求（/health /v1/models 等），只保留真实推理
+        if "chat/completions" not in (u.get("path") or "") and "/messages" not in (u.get("path") or ""):
+            continue
+        el = u.get("elapsed") or (u.get("ms") / 1000 if u.get("ms") else None)
+        out.append({
+            "id": u.get("ts") or "-",
+            "code": str(u.get("code") or ""),
+            "pt": u.get("prompt_tokens"),
+            "ct": u.get("completion_tokens"),
+            "tps": u.get("tps"),
+            "acc": None,
+            "total": (u.get("prompt_tokens") or 0) + (u.get("completion_tokens") or 0) or None,
+            "ms": int(el * 1000) if el else None,
+        })
+    # 补最近一次 decode 的接受率
+    stats = sglang_stats()
+    if out and stats.get("acc_rate") is not None:
+        out[0]["acc"] = stats["acc_rate"]
+    return out[:n]
+
 
 def log_tail(n=400):
     try:
@@ -185,36 +362,106 @@ def restart_proxy():
     subprocess.Popen(["pythonw", r"E:\working\llama-cpp\llama\model-tee.py"],
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
+def uptime_sglang():
+    """SGLang 在 WSL 里，用日志首个带时间戳的行估算存活时长（8080 网关须读 WSL 日志）
+    注意：日志首行可能是 Python warning，不带时间戳，须往后扫。"""
+    try:
+        with open(sg_log_path(), encoding="utf-8", errors="replace") as f:
+            for _ in range(200):
+                l = f.readline()
+                if not l:
+                    break
+                m = SG_TS.match(l)
+                if m:
+                    t0 = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    return max(0, (datetime.datetime.now() - t0).total_seconds())
+    except OSError:
+        pass
+    return None
+
+def health_ok(url=None):
+    """只看 HTTP 状态码：SGLang 的 /health 返回 200 但 body 为空，不能用 get_json"""
+    try:
+        with urllib.request.urlopen((url or ENDPOINT) + "/health", timeout=3) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
 def collect():
     d = {}
-    d["running"] = server_running()
-    d["health"] = get_json("/health")
-    m = get_json("/v1/models")
-    d["model"] = os.path.basename(m["data"][0]["id"]) if m and m.get("data") else "?"
-    d["gpus"] = vram()
-    d["slots"] = get_json("/slots") or []
-    d["reqs"] = recent_requests(50)
-    d["err"] = last_error()
-    d["deaths"] = death_stats()
-    d["up"] = uptime()
-    # 全端口普查：每个端口的存活 + 模型名
-    ports_stat = []
-    for name, (url, log, role) in PORTS.items():
+    # 全端口普查（并发 + 离线缓存）放最前：串行时死端口各等 ~2s，5 个端口要 8s ≫ 1s 刷新
+    import concurrent.futures as _cf
+
+    def probe_one(item):
+        name, (url, log, role) = item
         ok, mid = False, ""
         try:
-            with urllib.request.urlopen(url + "/health", timeout=1.5) as r:
+            # 超时须 ≥ SGLang /health 的固有延迟（实测 ~1.0s），否则活端口被误判离线
+            with urllib.request.urlopen(url + "/health", timeout=2.5) as r:
                 ok = (r.status == 200)
         except Exception:
-            pass
+            ok = False
         if ok:
             try:
-                with urllib.request.urlopen(url + "/v1/models", timeout=1.5) as r:
+                with urllib.request.urlopen(url + "/v1/models", timeout=2.5) as r:
                     mm = json.load(r)
-                    mid = os.path.basename(mm["data"][0]["id"]) if mm.get("data") else ""
+                    ids = [os.path.basename(m.get("id") or m.get("name") or "") for m in (mm.get("data") or [])]
+                    ids = [i for i in ids if i]
+                    mid = ", ".join(dict.fromkeys(ids)) if ids else ""
             except Exception:
                 pass
-        ports_stat.append({"name": name, "alive": ok, "model": mid, "role": role})
+        return {"name": name, "alive": ok, "model": mid, "role": role}
+
+    # 离线端口缓存：死端口连接被延迟拒绝（Windows ~2s），每轮都探会把 collect 拖到 4s。
+    # 活端口每轮照探；离线端口 60s 内跳过（省掉超时等待）。
+    now = time.time()
+
+    def probe_cached(item):
+        name, (url, log, role) = item
+        last = _port_cache.get(name)
+        if last is not None and last[0] is False and now - last[1] < 60:
+            return {"name": name, "alive": False, "model": "", "role": role, "_cached": True}
+        r = probe_one(item)
+        _port_cache[name] = (r["alive"], now)
+        return r
+
+    ports_stat = []
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=len(PORTS)) as ex:
+            for r in ex.map(probe_cached, PORTS.items()):
+                ports_stat.append(r)
+    except Exception:
+        ports_stat = [{"name": n, "alive": False, "model": "", "role": v[2]} for n, v in PORTS.items()]
     d["ports_stat"] = ports_stat
+    # 当前端点健康 = 普查结果里该端口那一行（避免再单独探一次 health，重复耗时 ~1s）
+    cur_alive = next((p["alive"] for p in ports_stat if PORTS.get(p["name"], (None,))[0] == ENDPOINT), None)
+
+    m = get_json("/v1/models")
+    sg = is_sglang(m)
+    d["is_sglang"] = sg
+    d["model"] = os.path.basename(m["data"][0]["id"]) if m and m.get("data") else "?"
+    d["gpus"] = vram()
+    if sg:
+        # SGLang 路径：无 /slots，改从日志解析
+        st = sglang_stats()
+        d["health"] = bool(cur_alive) if cur_alive is not None else health_ok()
+        d["running"] = bool(d["health"]) or st["running"] > 0
+        d["reqs"] = recent_requests_sglang(50)
+        # 只报"启动完成后"的错误（启动期 torchcodec 无害报错不算）
+        d["err"] = "" if st.get("last_ts") else st["err"]
+        d["slots"] = [{"is_processing": st["running"] > 0,
+                       "n_prompt_tokens": st["used"],
+                       "n_ctx": st["ctx"] or 262144,
+                       "id_task": None,
+                       "_sg": st}]
+    else:
+        d["running"] = server_running()
+        d["health"] = get_json("/health")
+        d["slots"] = get_json("/slots") or []
+        d["reqs"] = recent_requests(50)
+        d["err"] = last_error()
+    d["deaths"] = death_stats()
+    d["up"] = uptime_sglang() if sg else uptime()
     try:
         d["mode"] = open(MODE_FILE, encoding="utf-8").read().strip()
     except OSError:
@@ -511,7 +758,8 @@ class Win(QMainWindow):
             try:
                 d = collect()
                 revive = self.chk_revive.isChecked() if hasattr(self, "chk_revive") else False
-                main_link = ENDPOINT.endswith(":8080") or ENDPOINT.endswith(":8082")
+                # SGLang(WSL) 不归复活狗管：它是 WSL 进程，Windows 侧重启脚本不适用
+                main_link = (not d.get("is_sglang")) and (ENDPOINT.endswith(":8080") or ENDPOINT.endswith(":8082"))
                 proxy_ok = bool(d["health"])
                 if revive and main_link:
                     if self.was_running is True and d["running"] is False:
@@ -541,10 +789,8 @@ class Win(QMainWindow):
             pass
 
     def _live_file(self):
-        """按当前端口选 live 文件：8080/8082 主链路同源，都读 E:\LM\live-8080.txt"""
+        """按当前端口选 live 文件：8080 网关读自身流，其余端口读各自 tee 写出的 live"""
         port = ENDPOINT.rsplit(":", 1)[-1]
-        if port in ("8080", "8082"):
-            return r"E:\LM\live-8080.txt"
         return rf"E:\LM\live-{port}.txt"
 
     def fast_live(self):
@@ -561,12 +807,19 @@ class Win(QMainWindow):
 
     # ---------- 渲染 ----------
     def _autoswitch(self, ports_stat):
-        """所选端口死亡时，自动切到其他存活端口（有活口才切）"""
+        """所选端口连续 3 轮探测失败才自动切换（防抖：单次抖动不切，避免端口来回跳）"""
+        self._down_streak = getattr(self, "_down_streak", 0) + 1
+        if self._down_streak < 3:
+            return
         alive = [p["name"] for p in ports_stat if p["alive"] and PORTS[p["name"]][0] != ENDPOINT]
         if alive:
             target = alive[0]
+            self._down_streak = 0
             self.on_port_changed(target)
-            self._toast(f"↔ 目标端口已死，自动切换到 {target}")
+            self._toast(f"↔ 目标端口连续 3 次无响应，自动切换到 {target}")
+
+    def _reset_down_streak(self):
+        self._down_streak = 0
 
     def refresh(self):
         d = self.data
@@ -574,6 +827,8 @@ class Win(QMainWindow):
             return
         if not (d.get("health")):
             self._autoswitch(d.get("ports_stat") or [])
+        else:
+            self._reset_down_streak()
         # 端口表整表重建：在线排最上，模型名/状态每秒写实
         stat = d.get("ports_stat") or []
         stat_sorted = sorted(stat, key=lambda p: 0 if p["alive"] else 1)
@@ -607,6 +862,8 @@ class Win(QMainWindow):
         self.lb_health.style().unpolish(self.lb_health); self.lb_health.style().polish(self.lb_health)
 
         slots0 = d["slots"][0] if d["slots"] else {}
+        sg = d.get("is_sglang")
+        sgst = slots0.get("_sg") or {}
         proc = slots0.get("is_processing", False)
         used, ctx = slots0.get("n_prompt_tokens", 0), slots0.get("n_ctx", 0)
         pct = 100 * used // max(ctx, 1)
@@ -614,18 +871,30 @@ class Win(QMainWindow):
         # KPI
         up = d["up"]
         h, m = (int(up // 3600), int(up % 3600 // 60)) if up is not None else (0, 0)
-        self.v_up.setText(f"{h}h{m:02d}m")
+        self.v_up.setText(f"{h}h{m:02d}m" if up is not None else "—")
         self.v_ctx.setText(f"{pct}%")
-        lg = live_gen(slots0.get("id_task")) if proc else None
-        if lg:
-            self.v_spd.setText(f"{lg[2]:.0f}")
+        if sg:
+            # SGLang：直接读日志解析出的速度 / 接受率（已过滤空转行）
+            if sgst.get("tps") is not None:
+                # 运行中显示当前速度；空闲显示最近一次有效速度并加 · 标记
+                mark = "" if proc else "·"
+                self.v_spd.setText(f"{sgst['tps']:.0f}{mark}")
+            elif sgst.get("prefill_tps"):
+                self.v_spd.setText(f"—")  # 只有 prefill，还没进入解码
+            else:
+                self.v_spd.setText("—")
+            self.v_dft.setText(f"{sgst['acc_len']:.2f}" if sgst.get("acc_len") is not None else "—")
+            lg = None
         else:
-            # 空闲时显示最近一次速度（·=历史值）
-            last = last_speed()
-            self.v_spd.setText(f"{last:.0f}·" if last else "—")
-        reqs = d["reqs"]
-        acc = [r["acc"] for r in reqs if r.get("acc") is not None]
-        self.v_dft.setText(f"{sum(acc)/len(acc):.2f}" if acc else "—")
+            lg = live_gen(slots0.get("id_task")) if proc else None
+            if lg:
+                self.v_spd.setText(f"{lg[2]:.0f}")
+            else:
+                last = last_speed()
+                self.v_spd.setText(f"{last:.0f}·" if last else "—")
+            reqs = d["reqs"]
+            acc = [r["acc"] for r in reqs if r.get("acc") is not None]
+            self.v_dft.setText(f"{sum(acc)/len(acc):.2f}" if acc else "—")
         g = d["gpus"]
         if len(g) >= 2:
             self.v_g0.setText(f"{g[0]['temp']}°C")
@@ -634,9 +903,29 @@ class Win(QMainWindow):
             self.v_g0.setText(f"{g[0]['temp']}°C")
 
         # 进度条
-        self.bar_ctx.setValue(pct)
-        self.ctx_lab.setText(f"上下文  {fmt_k(used)} / {fmt_k(ctx)}   ({pct}%)")
-        if lg:
+        if sg:
+            # SGLang：KV 池是 143K 级别，用百分比只会常年显示 0%，
+            # 改为「活跃 token / KV 池」+ 池占用率，两个数字都真实可见
+            pool_pct = 100 * used // max(ctx, 1)
+            self.bar_ctx.setValue(pool_pct)
+            self.ctx_lab.setText(f"KV 池  {fmt_k(used)} / {fmt_k(ctx)}   ({pool_pct}%)  活跃请求 {sgst.get('running') or 0}")
+        else:
+            self.bar_ctx.setValue(pct)
+            self.ctx_lab.setText(f"上下文  {fmt_k(used)} / {fmt_k(ctx)}   ({pct}%)")
+        if sg:
+            if proc and sgst.get("tps") is not None:
+                self.bar_phase.setValue(100)
+                self.phase_lab.setText(f"解码生成  {fmt_k(sgst.get('used') or 0)} tok @ {sgst['tps']:.0f} tok/s（接受率 {sgst.get('acc_rate') or 0:.2f}）")
+                self.lb_phase_inline.setText(f"解码中 {fmt_k(sgst.get('used') or 0)} tok @ {sgst['tps']:.0f} t/s")
+            elif proc:
+                self.bar_phase.setValue(60)
+                self.phase_lab.setText("预填充 / 首 token 计算中")
+                self.lb_phase_inline.setText("预填中")
+            else:
+                self.bar_phase.setValue(0)
+                self.phase_lab.setText(f"阶段  空闲（KV 池 {fmt_k(ctx)}）")
+                self.lb_phase_inline.setText("")
+        elif lg:
             self.bar_phase.setValue(100)
             self.phase_lab.setText(f"解码生成  {fmt_k(lg[0])} tok @ {lg[2]:.0f} tok/s（均速 {lg[1]:.0f}）")
             self.lb_phase_inline.setText(f"解码中 {fmt_k(lg[0])} tok @ {lg[2]:.0f} t/s")
@@ -653,12 +942,16 @@ class Win(QMainWindow):
             self.lb_phase_inline.setText("")
 
         # 表
+        reqs = d["reqs"]
         self.table.setRowCount(len(reqs))
         for i, r in enumerate(reqs):
             ms = r.get("ms")
             ms_s = (f"{ms/1000:.1f}s" + ("⚠" if ms >= 30000 else "")) if ms is not None else "-"
             busy = (i == 0 and proc)
             st = "▲" if busy else "✓"
+            if sg:
+                code = r.get("code")
+                st = "▲" if code == "200" and busy else ("✓" if code == "200" else f"✗{code}")
             vals = [r["id"], fmt_k(r.get("pt")), fmt_k(r.get("ct")),
                     f"{r['tps']:.1f}" if r.get("tps") else "-",
                     f"{r['acc']:.2f}" if r.get("acc") is not None else "-",
@@ -670,6 +963,21 @@ class Win(QMainWindow):
                 self.table.setItem(i, j, it)
 
         # 狗（一行）
+        if sg:
+            # SGLang 是 WSL 里的实验实例，复活狗不介入；显示 WSL 状态与 KV 池
+            self.lb_dog.setText("WSL 实验狗")
+            self.lb_dog.setProperty("class", "dog_watch")
+            self.lb_dog.style().unpolish(self.lb_dog); self.lb_dog.style().polish(self.lb_dog)
+            self.st_alive.setText(f"存活 {h}h{m:02d}m" if up is not None else "存活 —")
+            self.st_reld.setText("TP=2")
+            self.st_dead.setText(f"KV池 {fmt_k(ctx)}")
+            self.st_cause.setText(f"接受率 {sgst.get('acc_rate') or 0:.2f} · 无自动重启")
+            self.st_speed.setText(f"均速 {sgst.get('tps') or 0:.1f} t/s")
+            if d["err"]:
+                self.lb_toast.setText(f"⚠ {d['err'][:90]}")
+            elif self.lb_toast.text().startswith("⚠"):
+                self.lb_toast.setText("")
+            return
         nd, nr, verdict, t = d["deaths"]
         v_short = "CRASH(WER)" if "CRASH" in verdict else ("静默退出" if "SILENT" in verdict else "无")
         if nr > 0 and up is not None and up < 3600:
