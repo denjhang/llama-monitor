@@ -825,9 +825,25 @@ class Win(QMainWindow):
             pass
 
     def _live_file(self):
-        """按当前端口选 live 文件：8080 网关读自身流，其余端口读各自 tee 写出的 live"""
+        """按当前端口选 live 文件。
+
+        坑（2026-09-25 用户发现）：8080 网关与 8092 tee 是两个独立代理，各写各的
+        live 文件，但都指向同一后端 8082——于是点 8080 和 8092 看到的实时内容不同
+        （各自只记录经过自己的请求，另一个文件的旧内容显得"反直觉"）。
+        修法：同一后端的端口共享实时视图，取其中最新的那个文件。"""
         port = ENDPOINT.rsplit(":", 1)[-1]
-        return rf"E:\LM\live-{port}.txt"
+        # 同后端代理组：8080 网关与 8092 tee 都转发到 8082，实时视图应一致
+        group = {"8080": ["8080", "8092"], "8092": ["8080", "8092"]}.get(port, [port])
+        best, best_mt = None, -1
+        for p in group:
+            f = rf"E:\LM\live-{p}.txt"
+            try:
+                mt = os.path.getmtime(f)
+            except OSError:
+                continue
+            if mt > best_mt:
+                best, best_mt = f, mt
+        return best or rf"E:\LM\live-{port}.txt"
 
     def fast_live(self):
         try:
