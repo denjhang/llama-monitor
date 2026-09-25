@@ -139,33 +139,46 @@ def sglang_stats():
                 continue
             out["err"] = l.strip()[:120]
             break
-    # ---- 忙闲判定：取【最后一条 batch 行】（decode 或 prefill 都算），它的
-    # #running-req 才是当前真实并发数。只看最后一条 decode 会拿到历史残留值，
-    # 空闲时仍显示"解码中"（收尾的 Prefill batch #running-req: 0 才是真相）。----
-    last_batch_ts, last_batch_running = None, None
+    # ---- 阶段判定（prefill / decode / idle）----
+    # 取【最后一条 batch 行】。关键：SGLang 预填充时 #running-req 仍为 0
+    # （请求尚未进入 decode running 集合），只看 #running-req 会导致
+    # 预填充永远显示"空闲"（2026-09-25 用户报障）。正确信号：
+    #   · Decode batch  + #running-req > 0        → 解码中
+    #   · Prefill batch + #pending-token > 0      → 预填充中（长 prompt 分块预填）
+    #   · Prefill batch + #new-token > 1          → 预填充中（单批大 token）
+    #   · Prefill batch + #new-token = 1 & pending 0 → 空闲心跳（SGLang 每 3s 打印）
+    # 另加时间新鲜度：最后一条 batch 行超过 15s 前 → 视作空闲。
+    last_batch = None
     for l in reversed(lines):
         if SG_TS.match(l) and ("Decode batch" in l or "Prefill batch" in l):
-            last_batch_ts = SG_TS.match(l).group(1)
-            md = SG_DECODE.search(l)
-            mp = SG_PREFILL.search(l)
-            if md:
-                last_batch_running = int(md.group(1))
-            elif mp:
-                last_batch_running = int(mp.group(2))
-            else:
-                mr = re.search(r"#running-req:\s*(\d+)", l)
-                last_batch_running = int(mr.group(1)) if mr else 0
+            last_batch = l
             break
-    out["last_ts"] = last_batch_ts
-    out["running"] = last_batch_running if last_batch_running is not None else 0
-    # 若最后一条 batch 行是几分钟前的，视作已空闲
-    if last_batch_ts:
+    phase, batch_running, pending_tok = "idle", 0, 0
+    if last_batch:
+        ts_b = SG_TS.match(last_batch).group(1)
+        out["last_ts"] = ts_b
+        is_decode = "Decode batch" in last_batch
+        mr = re.search(r"#running-req:\s*(\d+)", last_batch)
+        batch_running = int(mr.group(1)) if mr else 0
+        mp = re.search(r"#pending-token:\s*(\d+)", last_batch)
+        pending_tok = int(mp.group(1)) if mp else 0
+        mn = re.search(r"#new-token:\s*(\d+)", last_batch)
+        new_tok = int(mn.group(1)) if mn else 0
         try:
-            t_b = datetime.datetime.strptime(last_batch_ts, "%Y-%m-%d %H:%M:%S")
-            if (datetime.datetime.now() - t_b).total_seconds() > 90:
-                out["running"] = 0
+            t_b = datetime.datetime.strptime(ts_b, "%Y-%m-%d %H:%M:%S")
+            fresh = (datetime.datetime.now() - t_b).total_seconds() <= 15
         except ValueError:
-            pass
+            fresh = False
+        if fresh:
+            if is_decode and batch_running > 0:
+                phase = "decode"
+            elif (not is_decode) and (pending_tok > 0 or new_tok > 1):
+                phase = "prefill"
+    out["phase"] = phase
+    out["pending_tok"] = pending_tok
+    # 预填充时 #running-req 恒为 0（请求还没进 decode 集合），但"有活跃请求"
+    # 这一点必须体现在 running 上——否则槽位/活跃请求数显示为空。
+    out["running"] = 0 if phase == "idle" else max(batch_running, 1)
     # ---- 最近的 decode：只认有实际生成量的行（供速度显示）----
     best_tps = None
     for l in reversed(lines):
@@ -189,12 +202,44 @@ def sglang_stats():
     # 没有有效 decode 时，退回最近一次 prefill 的输入吞吐
     for l in reversed(lines):
         m = SG_PREFILL.search(l)
-        if m:
-            m2 = SG_PREFILL_TPS.search(l)
-            if m2:
-                out["prefill_tps"] = float(m2.group(1))
-                out["new_token"] = int(m.group(1))
-            break
+    # 最近一次有实际量的 prefill 块（末块常是 new-token 很小的收尾，
+    # 其 tps 分母是块时延会被算成畸高，须跳过；再设上限挡掉同秒多行的残余值）
+    for l in reversed(lines):
+        m = SG_PREFILL.search(l)
+        if not m:
+            continue
+        nt = int(m.group(1))
+        if nt <= 1:
+            continue
+        m2 = SG_PREFILL_TPS.search(l)
+        if m2:
+            tps = float(m2.group(1))
+            # 预填充合理区间：< 20000 tok/s（本机实测 300~1200，>2 万必是空转/收尾行）
+            if 1.0 < tps < 20000:
+                out["prefill_tps"] = tps
+        out["new_token"] = nt
+        break
+    # 预填充阶段的 KV 显示：把本次请求各 prefill 块的 new-token 累加为已处理量，
+    # 加上 #pending-token（剩余）即该 prompt 总长。
+    # 从后往前扫，累计所有 prefill 块；遇到空闲心跳行（new≤1 且 pending=0）
+    # 或 Decode 行（上一请求的边界）才停——不能见 pending=0 就停，
+    # 那只是最后一块（会少算前面所有块）。
+    if out.get("phase") == "prefill":
+        acc = 0
+        for l in reversed(lines):
+            if "Decode batch" in l:
+                break                 # 越过上一请求的解码行 = 请求边界
+            mm = re.search(r"Prefill batch.*?#new-token:\s*(\d+).*?#pending-token:\s*(\d+)", l)
+            if not mm:
+                continue
+            nt, pend = int(mm.group(1)), int(mm.group(2))
+            if nt <= 1 and pend == 0:
+                break                 # 空闲心跳行 = 本次请求起点
+            acc += nt
+        out["prefill_acc"] = acc
+        total = acc + out.get("pending_tok", 0)
+        if total > 0:
+            out["used"] = total
     if out["last_ts"] is None:
         out["err"] = ""
     return out
@@ -738,7 +783,7 @@ class Win(QMainWindow):
     def on_port_changed(self, text):
         global ENDPOINT, SERVER_LOG
         ENDPOINT, SERVER_LOG, _role = PORTS[text]
-        self.data = {}   # 立即重采
+        # 保留旧数据直到下轮 collect() 返回新端口数据（清空会导致 UI 闪烁/全空）
         try:
             self.txt_live.setPlainText("")
         except Exception:
@@ -979,14 +1024,22 @@ class Win(QMainWindow):
             self.bar_ctx.setValue(pct)
             self.ctx_lab.setText(f"上下文  {fmt_k(used)} / {fmt_k(ctx)}   ({pct}%)")
         if sg:
-            if proc and sgst.get("tps") is not None:
+            phase = sgst.get("phase") or ("decode" if proc else "idle")
+            if phase == "decode" and sgst.get("tps") is not None:
                 self.bar_phase.setValue(100)
                 self.phase_lab.setText(f"解码生成  {fmt_k(sgst.get('used') or 0)} tok @ {sgst['tps']:.0f} tok/s（接受率 {sgst.get('acc_rate') or 0:.2f}）")
                 self.lb_phase_inline.setText(f"解码中 {fmt_k(sgst.get('used') or 0)} tok @ {sgst['tps']:.0f} t/s")
-            elif proc:
-                self.bar_phase.setValue(60)
-                self.phase_lab.setText("预填充 / 首 token 计算中")
-                self.lb_phase_inline.setText("预填中")
+            elif phase == "prefill":
+                # 预填充进度：与 llama.cpp 同款「百分比（已处理 / 总长 tok）」显示
+                done = sgst.get("prefill_acc") or 0
+                pend = sgst.get("pending_tok") or 0
+                tot = done + pend
+                p_pct = 100 * done // tot if tot > 0 else 30
+                self.bar_phase.setValue(max(5, min(99, p_pct)))
+                ptps = sgst.get("prefill_tps")
+                tp = f" @ {ptps:.0f} tok/s" if ptps else ""
+                self.phase_lab.setText(f"预填充  {p_pct}%（{fmt_k(done)} / {fmt_k(tot)} tok）{tp}")
+                self.lb_phase_inline.setText(f"预填中 {p_pct}%")
             else:
                 self.bar_phase.setValue(0)
                 self.phase_lab.setText(f"阶段  空闲（KV 池 {fmt_k(ctx)}）")
