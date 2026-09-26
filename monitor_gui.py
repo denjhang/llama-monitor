@@ -341,6 +341,19 @@ def log_tail(n=400):
     except OSError:
         return []
 
+def live_file_fresh(seconds=20):
+    """live 文件 20 秒内有过输出 = 连续请求中。
+    agent 高速连发小请求时，请求间隙 is_processing 会瞬间翻 False，
+    监控采到间隙就误显示"空闲"（2026-09-26 用户报障）。以此做宽恕窗口。"""
+    import os, time
+    for f in (r"E:\LM\live-8080.txt", r"E:\working\llama-cpp\llama-b11139\live-gen.txt"):
+        try:
+            if time.time() - os.path.getmtime(f) < seconds:
+                return True
+        except OSError:
+            pass
+    return False
+
 def last_speed():
     """日志里最近一条 n_gen 的瞬时速度（跨任务）"""
     for l in reversed(log_tail(80)):
@@ -1119,6 +1132,12 @@ class Win(QMainWindow):
             self.bar_phase.setValue(pp)
             self.phase_lab.setText(f"预填充  {pp}%（{fmt_k(pdone)} / {fmt_k(ptot)} tok）")
             self.lb_phase_inline.setText(f"预填中 {pp}%")
+        elif live_file_fresh():
+            # 请求间隙：is_processing 瞬时 False 但 live 仍在输出 → 不许装空闲
+            sp = last_speed()
+            self.bar_phase.setValue(100)
+            self.phase_lab.setText(f"连续请求中 @ {sp:.0f} t/s" if sp else "连续请求中")
+            self.lb_phase_inline.setText("连续请求中")
         else:
             self.bar_phase.setValue(0)
             self.phase_lab.setText("阶段  空闲")
