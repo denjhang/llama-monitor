@@ -16,20 +16,20 @@ if len(_args) >= 2:
     ROUTES = [("", int(_args[1]))]          # "" 恒匹配 → 全部转发该上游
     DEFAULT_PORT = int(_args[1])
 else:
-    ROUTES = [("lfm", 8083), ("ministral", 8084)]   # 模型名关键词 → 端口
+    ROUTES = [("35b", 8085), ("spark", 8086), ("gemma", 8086)]   # 模型名关键词 → 端口（27B 默认 8082）
     # 默认上游 = 27B（llama.cpp / SGLang 都在 8082，二者互斥）；可用 TEE_DEFAULT_PORT 覆盖
     DEFAULT_PORT = int(os.environ.get("TEE_DEFAULT_PORT", "8082"))
 GATEWAY = len(_args) == 1   # 单参启动 = 网关（多后端按 model 路由 + /v1/models 聚合）
-PORT_NAMES = {8082: "27b", 8083: "lfm", 8084: "ministral"}
+PORT_NAMES = {8082: "qwen3.8-27b", 8085: "qwen3.6-35b-a3b", 8086: "gemma-4-e4b"}
 # 对外绑定：网关默认 0.0.0.0（局域网可直连），单上游保持回环；均可用 TEE_HOST 覆盖
 TEE_HOST = os.environ.get("TEE_HOST") or ("0.0.0.0" if GATEWAY else "127.0.0.1")
 # 上游需要的鉴权 token：SGLang 用 --api-key，网关替客户端补上（key=端口）
 UPSTREAM_KEYS = {8082: os.environ.get("SGLANG_API_KEY", "local-key")}
 # 死端口黑名单（端口 -> 解禁时间戳）：连接被延迟拒绝~2s 的端口 5 分钟内不再探测
 _dead_ports = {}
-LIVE  = rf"E:\LM\live-{LISTEN}.txt" if _args else r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
-USAGE = rf"E:\LM\tee-usage-{LISTEN}.jsonl" if _args else r"E:\working\llama-cpp\llama-b11139\tee-usage.jsonl"
-MODE_FILE = r"E:\working\llama-cpp\llama-b11139\server-mode.txt"
+LIVE  = rf"D:\llama\live-{LISTEN}.txt" if _args else r"D:\llama\live-gen.txt"
+USAGE = rf"D:\llama\tee-usage-{LISTEN}.jsonl" if _args else r"D:\llama\tee-usage.jsonl"
+MODE_FILE = r"D:\llama\server-mode.txt"
 # 自身出站请求一律绕过系统代理（Clash 等会劫持 127.0.0.1 导致超时）
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _orig_urlopen = urllib.request.urlopen

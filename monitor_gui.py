@@ -15,26 +15,23 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QLabel, QProgressBar, QTableWidget,
                                QTableWidgetItem, QHeaderView, QFrame, QTextEdit,
                                QSizePolicy, QGridLayout, QPushButton, QDialog,
-                               QRubberBand, QComboBox, QCheckBox)
+                               QRubberBand, QComboBox, QCheckBox, QScrollArea)
 
-# 可监控端口表：url + 各自日志（小模型日志在 E:\LM\small-<端口>.log）
+# 可监控端口表（三模型驻留版）
 PORTS = {
-    "8080 · 统一网关": ("http://127.0.0.1:8080", r"E:\working\llama-cpp\llama-b11139\llama-server.log", "对外入口（按模型路由）"),
-    "8092 · SGLang-27B (WSL)": ("http://127.0.0.1:8092", r"\\wsl.localhost\Ubuntu-24.04\root\sglang-best.log", "WSL SGLang TP=2 补丁版"),
-    "8083 · LFM2.5-2.6B": ("http://127.0.0.1:8083", r"E:\LM\small-8183.log", "直连（真实服务）"),
-    "8084 · Ministral14B": ("http://127.0.0.1:8084", r"E:\LM\small-8184.log", "直连（真实服务）"),
-    "8085 · MiniCPM5-1B-Fable5微调":    ("http://127.0.0.1:8085", r"E:\LM\small-8085.log", "直连（真实服务）"),
+    "8082 · qwen3.8-27b":     ("http://127.0.0.1:8082", r"D:\llama\server-qwen38-27b.err.log", "27B治疗版+DFlash2草稿+视觉"),
+    "8085 · qwen3.6-35b-a3b": ("http://127.0.0.1:8085", r"D:\llama\server-qwen36-35b.err.log", "35B-A3B蒸馏+内置MTP+视觉"),
+    "8086 · spark-x25-4b":    ("http://127.0.0.1:8086", r"D:\llama\server-spark-x25.err.log", "星火X2.5-4B轻量"),
 }
-ENDPOINT   = PORTS["8080 · 统一网关"][0]
-SERVER_LOG = PORTS["8080 · 统一网关"][1]
-LIVE_FILE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
-LIVE_FILE  = r"E:\working\llama-cpp\llama-b11139\live-gen.txt"
-EVENTS_LOG = r"E:\working\llama-cpp\llama\watchdog-events.log"
-MODE_FILE  = r"E:\working\llama-cpp\llama-b11139\server-mode.txt"
-EXE        = "llama-server.exe"
-CFG_FILE   = r"E:\working\llama-cpp\llama\monitor-gui-cfg.json"
+ENDPOINT   = PORTS["8082 · qwen3.8-27b"][0]
+SERVER_LOG = PORTS["8082 · qwen3.8-27b"][1]
+LIVE_FILE  = r"D:\llama\live-gen.txt"
+EVENTS_LOG = r"D:\llama\watchdog-events.log"
+MODE_FILE  = r"D:\llama\server-mode.txt"
+EXE        = r"D:\llama\llama-server.exe"
+CFG_FILE   = r"D:\llama\monitor-gui-cfg.json"
 
-QSS_FILE = r"E:\working\llama-cpp\llama\monitor-gui.qss"
+QSS_FILE = r"D:\llama-monitor\monitor-gui.qss"
 
 def load_qss():
     try:
@@ -346,7 +343,7 @@ def live_file_fresh(seconds=20):
     agent 高速连发小请求时，请求间隙 is_processing 会瞬间翻 False，
     监控采到间隙就误显示"空闲"（2026-09-26 用户报障）。以此做宽恕窗口。"""
     import os, time
-    for f in (r"E:\LM\live-8080.txt", r"E:\working\llama-cpp\llama-b11139\live-gen.txt"):
+    for f in (r"D:\llama\live-8080.txt", r"D:\llama\live-gen.txt"):
         try:
             if time.time() - os.path.getmtime(f) < seconds:
                 return True
@@ -484,7 +481,7 @@ def restart_server():
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 def restart_proxy():
-    subprocess.Popen(["pythonw", r"E:\working\llama-cpp\llama\model-tee.py"],
+    subprocess.Popen(["pythonw", r"D:\llama-monitor\model-tee.py"],
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 def uptime_sglang():
@@ -575,6 +572,17 @@ def collect():
     d["is_sglang"] = sg
     d["model"] = os.path.basename(m["data"][0]["id"]) if m and m.get("data") else "?"
     d["gpus"] = vram()
+    try:
+        with urllib.request.urlopen(ENDPOINT + "/metrics", timeout=3) as r:
+            mt = r.read().decode("utf-8", "replace")
+        def _gauge(nm):
+            m = re.search(r"^[ 	]*" + re.escape(nm) + r"[ 	]+([0-9.eE+-]+)", mt, re.M)
+            return float(m.group(1)) if m else 0.0
+        d["mt_prompt_tps"] = _gauge("llamacpp:prompt_tokens_seconds")
+        d["mt_pred_tps"] = _gauge("llamacpp:predicted_tokens_seconds")
+        d["mt_processing"] = _gauge("llamacpp:requests_processing")
+    except Exception:
+        d["mt_prompt_tps"] = d["mt_pred_tps"] = d["mt_processing"] = None
     if sg:
         # SGLang 路径：无 /slots，改从日志解析
         st = sglang_stats()
@@ -624,6 +632,17 @@ def kpi_tile(caption):
     val = QLabel("-"); val.setProperty("class", "kpi"); val.setAlignment(Qt.AlignHCenter)
     v.addWidget(cap); v.addWidget(val)
     return f, val
+
+def bar_tile(caption):
+    """KPI 瓷砖：标题 + 进度条（非纯文字）"""
+    f = QFrame(); f.setProperty("class", "tile")
+    f.setAttribute(Qt.WA_StyledBackground, True)
+    v = QVBoxLayout(f); v.setContentsMargins(12, 8, 12, 8); v.setSpacing(4)
+    cap = QLabel(caption); cap.setProperty("class", "cap"); cap.setAlignment(Qt.AlignHCenter)
+    bar = QProgressBar(); bar.setRange(0, 100)
+    bar.setAlignment(Qt.AlignHCenter); bar.setFixedHeight(18)
+    v.addWidget(cap); v.addWidget(bar)
+    return f, bar
 
 def bar_row(title):
     """带标题的进度条行"""
@@ -699,12 +718,11 @@ class Win(QMainWindow):
         # KPI 瓷砖行（6 块）
         kpis = QHBoxLayout(); kpis.setSpacing(8)
         self.t_up,  self.v_up  = kpi_tile("存活时间")
-        self.t_ctx, self.v_ctx = kpi_tile("上下文占用")
         self.t_spd, self.v_spd = kpi_tile("生成速度")
         self.t_dft, self.v_dft = kpi_tile("DRAFT 命中")
-        self.t_g0,  self.v_g0  = kpi_tile("GPU 0")
-        self.t_g1,  self.v_g1  = kpi_tile("GPU 1")
-        for t in (self.t_up, self.t_ctx, self.t_spd, self.t_dft, self.t_g0, self.t_g1):
+        self.t_cb, self.bar_cb = bar_tile("上下文")
+        self.t_ph, self.bar_ph = bar_tile("阶段")
+        for t in (self.t_up, self.t_spd, self.t_dft, self.t_cb, self.t_ph):
             kpis.addWidget(t, stretch=1)
         col.addLayout(kpis)
 
@@ -715,11 +733,24 @@ class Win(QMainWindow):
         self.ctx_row,  self.ctx_lab,  self.bar_ctx  = bar_row("上下文")
         self.phase_row, self.phase_lab, self.bar_phase = bar_row("阶段（预填充 / 解码）")
         left.addWidget(self.ctx_row); left.addWidget(self.phase_row)
-        # 两条显存条（GPU0/GPU1）：标题含温度，右侧显示 已用/总量 (百分比)
+        # 显存条（原版样式：标题含温度，右侧 已用/总量），5 卡纵向滚动
         self.vm0_row, self.vm0_lab, self.vm0_val, self.bar_vm0 = vram_row("GPU 0 显存")
         self.vm1_row, self.vm1_lab, self.vm1_val, self.bar_vm1 = vram_row("GPU 1 显存")
+        self.vm2_row, self.vm2_lab, self.vm2_val, self.bar_vm2 = vram_row("GPU 2 显存")
+        self.vm3_row, self.vm3_lab, self.vm3_val, self.bar_vm3 = vram_row("GPU 3 显存")
+        self.vm4_row, self.vm4_lab, self.vm4_val, self.bar_vm4 = vram_row("GPU 4 显存")
+        self.gpu_scroll = QScrollArea(); self.gpu_scroll.setWidgetResizable(True)
+        self.gpu_scroll.setFixedHeight(150)
+        self.gpu_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.gpu_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        gpu_holder = QWidget(); gpu_lay = QVBoxLayout(gpu_holder)
+        gpu_lay.setContentsMargins(0, 0, 0, 0); gpu_lay.setSpacing(0)
+        for w in (self.vm0_row, self.vm1_row, self.vm2_row, self.vm3_row, self.vm4_row):
+            gpu_lay.addWidget(w)
+        gpu_lay.addStretch(1)
+        self.gpu_scroll.setWidget(gpu_holder)
         left.addSpacing(6)
-        left.addWidget(self.vm0_row); left.addWidget(self.vm1_row)
+        left.addWidget(self.gpu_scroll)
         left.addStretch(1)
         left_w = QWidget(); left_w.setLayout(left); left_w.setFixedWidth(230)
         right = QVBoxLayout()
@@ -1047,7 +1078,6 @@ class Win(QMainWindow):
         up = d["up"]
         h, m = (int(up // 3600), int(up % 3600 // 60)) if up is not None else (0, 0)
         self.v_up.setText(f"{h}h{m:02d}m" if up is not None else "—")
-        self.v_ctx.setText(f"{pct}%")
         if sg:
             # SGLang：直接读日志解析出的速度 / 接受率（已过滤空转行）
             if sgst.get("tps") is not None:
@@ -1071,57 +1101,64 @@ class Win(QMainWindow):
             acc = [r["acc"] for r in reqs if r.get("acc") is not None]
             self.v_dft.setText(f"{sum(acc)/len(acc):.2f}" if acc else "—")
         g = d["gpus"]
-        if len(g) >= 2:
-            self.v_g0.setText(f"{g[0]['temp']}°C")
-            self.v_g1.setText(f"{g[1]['temp']}°C")
-        elif len(g) == 1:
-            self.v_g0.setText(f"{g[0]['temp']}°C")
-        # 显存条：标题带温度，右侧 已用/总量 (百分比)，条长=占用率
-        for row_i, (lab, val, bar) in enumerate(
-                ((self.vm0_lab, self.vm0_val, self.bar_vm0),
-                 (self.vm1_lab, self.vm1_val, self.bar_vm1))):
-            if row_i < len(g):
-                gp = g[row_i]
+        # 显存条：原版样式，扩到 5 卡
+        for lab, val, bar, gp in (
+                (self.vm0_lab, self.vm0_val, self.bar_vm0, g[0] if len(g) > 0 else None),
+                (self.vm1_lab, self.vm1_val, self.bar_vm1, g[1] if len(g) > 1 else None),
+                (self.vm2_lab, self.vm2_val, self.bar_vm2, g[2] if len(g) > 2 else None),
+                (self.vm3_lab, self.vm3_val, self.bar_vm3, g[3] if len(g) > 3 else None),
+                (self.vm4_lab, self.vm4_val, self.bar_vm4, g[4] if len(g) > 4 else None)):
+            if gp:
                 pctv = 100 * gp["used"] // max(gp["tot"], 1)
                 lab.setText(f"GPU {gp['i']} 显存 · {gp['temp']}°C")
                 val.setText(f"{fmt_gb(gp['used'])} / {fmt_gb(gp['tot'])}  ({pctv}%)")
                 bar.setValue(pctv)
             else:
-                lab.setText(f"GPU {row_i} 显存 · —")
-                val.setText("—")
-                bar.setValue(0)
+                lab.setText("GPU 显存 · —"); val.setText("—"); bar.setValue(0)
 
-        # 进度条
+        # 顶部瓷砖：上下文 / 阶段 进度同步
+        self.bar_cb.setValue(self.bar_ctx.value())
+        self.bar_ph.setValue(self.bar_phase.value())
+
+        # 进度条（上下文）
         if sg:
-            # SGLang：KV 池是 143K 级别，用百分比只会常年显示 0%，
-            # 改为「活跃 token / KV 池」+ 池占用率，两个数字都真实可见
             pool_pct = 100 * used // max(ctx, 1)
             self.bar_ctx.setValue(pool_pct)
             self.ctx_lab.setText(f"KV 池  {fmt_k(used)} / {fmt_k(ctx)}   ({pool_pct}%)  活跃请求 {sgst.get('running') or 0}")
         else:
             self.bar_ctx.setValue(pct)
             self.ctx_lab.setText(f"上下文  {fmt_k(used)} / {fmt_k(ctx)}   ({pct}%)")
-        if sg:
-            phase = sgst.get("phase") or ("decode" if proc else "idle")
-            if phase == "decode" and sgst.get("tps") is not None:
-                self.bar_phase.setValue(100)
-                self.phase_lab.setText(f"解码生成  {fmt_k(sgst.get('used') or 0)} tok @ {sgst['tps']:.0f} tok/s（接受率 {sgst.get('acc_rate') or 0:.2f}）")
-                self.lb_phase_inline.setText(f"解码中 {fmt_k(sgst.get('used') or 0)} tok @ {sgst['tps']:.0f} t/s")
-            elif phase == "prefill":
-                # 预填充进度：分母用冻结的 prefill_total（开场最大 已填+剩余 ≈ prompt 总长）
-                done = sgst.get("prefill_acc") or 0
-                tot = sgst.get("prefill_total") or (done + (sgst.get("pending_tok") or 0))
-                p_pct = int(100 * done / tot) if tot > 0 else 30
-                self.bar_phase.setValue(max(5, min(99, p_pct)))
-                ptps = sgst.get("prefill_tps")
-                tp = f" @ {ptps:.0f} tok/s" if ptps else ""
-                self.phase_lab.setText(f"预填充  {p_pct}%（{fmt_k(done)} / {fmt_k(tot)} tok）{tp}")
-                self.lb_phase_inline.setText(f"预填中 {p_pct}%")
-            else:
-                self.bar_phase.setValue(0)
-                self.phase_lab.setText(f"阶段  空闲（KV 池 {fmt_k(ctx)}）")
-                self.lb_phase_inline.setText("")
-        elif lg:
+        self.bar_cb.setValue(self.bar_ctx.value())
+        self.bar_cb.setFormat(fmt_k(used) + " / " + fmt_k(ctx) + "  %p%")
+
+        # 阶段判定（源码级）：/slots is_processing + /metrics gauge
+        #   预填充 = 处理中且 prompt_tokens_seconds > 0
+        #   解码   = 处理中且 predicted_tokens_seconds > 0（预填充 gauge 已归零）
+        #   空闲   = requests_processing == 0
+        mt_p, mt_d, mt_proc = d.get("mt_prompt_tps"), d.get("mt_pred_tps"), d.get("mt_processing")
+        if mt_proc is None:
+            phase = ("decode" if proc else "idle")
+        elif proc and (mt_p or 0) > 0:
+            phase = "prefill"
+        elif proc and (mt_d or 0) > 0:
+            phase = "decode"
+        elif proc:
+            phase = "decode"
+        else:
+            phase = "idle"
+        if phase == "prefill":
+            self.bar_phase.setValue(60)
+            self.phase_lab.setText(f"预填充中  prompt {mt_p:.0f} tok/s（官方 metrics gauge）")
+            self.lb_phase_inline.setText("预填中")
+        elif phase == "decode":
+            self.bar_phase.setValue(100)
+            self.phase_lab.setText(f"解码中  {mt_d:.0f} tok/s（官方 metrics gauge）")
+            self.lb_phase_inline.setText("解码中")
+        else:
+            self.bar_phase.setValue(0)
+            self.phase_lab.setText("阶段  空闲")
+            self.lb_phase_inline.setText("")
+        if False:
             self.bar_phase.setValue(100)
             self.phase_lab.setText(f"解码生成  {fmt_k(lg[0])} tok @ {lg[2]:.0f} tok/s（均速 {lg[1]:.0f}）")
             self.lb_phase_inline.setText(f"解码中 {fmt_k(lg[0])} tok @ {lg[2]:.0f} t/s")
@@ -1210,6 +1247,6 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyleSheet(load_qss())
     from PySide6.QtGui import QIcon
-    app.setWindowIcon(QIcon(r"E:\working\llama-cpp\llama\llama-monitor.ico"))
+    app.setWindowIcon(QIcon(r"D:\llama-monitor\llama-monitor.ico"))
     w = Win(); w.show()
     sys.exit(app.exec())
