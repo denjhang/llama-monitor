@@ -614,6 +614,7 @@ def collect():
         d["strata_metrics"] = get_json("/metrics") or {}
     d["model"] = os.path.basename(m["data"][0]["id"]) if m and m.get("data") else "?"
     d["gpus"] = vram()
+    d["tm_cpu"] = tm_cpu()   # 后台线程采(阻塞~2s 无碍), UI 只读
     try:
         with urllib.request.urlopen(ENDPOINT + "/metrics", timeout=3) as r:
             mt = r.read().decode("utf-8", "replace")
@@ -675,6 +676,20 @@ def kpi_tile(caption):
     v.addWidget(cap); v.addWidget(val)
     return f, val
 
+
+
+_BASE_GHZ = 2.3   # E5-2673 v4 基准频率
+
+def tm_cpu():
+    """任务管理器同款: % Processor Utility(百分比) + % Processor Performance(频率)
+    返回 (util_pct, ghz_str)；失败返回 (None, None)"""
+    out = run_cmd(["powershell", "-NoProfile", "-Command",
+                   "(Get-Counter '\\Processor Information(_Total)\\% Processor Utility','\\Processor Information(_Total)\\% Processor Performance' -SampleInterval 1 -MaxSamples 1).CounterSamples.CookedValue -join ','"])
+    try:
+        util, perf = [float(x) for x in out.strip().split(",")[:2]]
+        return int(util), f"{_BASE_GHZ * perf / 100:.2f}"
+    except Exception:
+        return None, None
 
 def set_txt(lbl, text):
     if lbl.text() != text:
@@ -1156,18 +1171,22 @@ class Win(QMainWindow):
         self._anim_targets["ctx"] = pct_s
         set_txt(self.ctx_lab, f"上下文  {fmt_k(used_s)} / {fmt_k(ctx_s)}   ({pct_s}%)")
         # CPU: 死区+直写(无过渡, 波动大); 内存: 死区+双向平滑
-        import psutil as _ps
         def _db(cur, new, band=3):
             return cur if abs(new - cur) <= band else new
-        cpu_real = int(_ps.cpu_percent(0.2))          # 阻塞实测窗口=真实总均值(None 模式有假尖峰)
-        cpu_new = _db(getattr(self, "_anim_cpu", 0), cpu_real)
+        # CPU: 数据层后台线程已采好(任务管理器同源), UI 只读零阻塞
+        util_pct, ghz = d.get("tm_cpu") or (None, None)
+        if util_pct is not None:
+            cpu_new = _db(getattr(self, "_anim_cpu", 0), util_pct)
+            if cpu_new != getattr(self, "_anim_cpu", None) or ghz != getattr(self, "_cpu_ghz", None):
+                self._anim_cpu = cpu_new
+                self._cpu_ghz = ghz
+                set_val(self.bar_cb, cpu_new)
+                set_fmt(self.bar_cb, f"CPU {cpu_new}%  {ghz}GHz")
+        # 内存: 已用/总量
+        import psutil as _ps
         vm = _ps.virtual_memory()
         ram_pct_new = int(vm.percent)
         ram_txt_new = f"{vm.used/2**30:.0f}G / {vm.total/2**30:.0f}G"
-        if cpu_new != getattr(self, "_anim_cpu", None):
-            self._anim_cpu = cpu_new
-            set_val(self.bar_cb, cpu_new)
-            set_fmt(self.bar_cb, f"CPU {cpu_new}%")
         if ram_pct_new != getattr(self, "_anim_ram_pct", None) or ram_txt_new != getattr(self, "_ram_txt", None):
             self._anim_ram_pct = ram_pct_new
             self._ram_txt = ram_txt_new
