@@ -169,6 +169,22 @@ def strip_thinking(body, path=""):
         pass
     return body
 
+def clear_think_budget(body, path=""):
+    """Strata config 曾把 reasoning_budget_tokens 钉成 1，思考刚开头就被服务器注入
+    "I have thought about this long enough" 强制收尾。请求自带该字段可覆盖 config 默认，
+    这里补 0（无限制）；客户端显式传了值就不动。仅 OpenAI 协议路径。"""
+    if "/chat/completions" not in path or not body:
+        return body
+    try:
+        d = json.loads(body)
+        if not isinstance(d, dict) or "reasoning_budget_tokens" in d:
+            return body
+        d["reasoning_budget_tokens"] = 0
+        return json.dumps(d, ensure_ascii=False).encode("utf-8")
+    except Exception:
+        pass
+    return body
+
 def handle_sse_line(line, out_txt, st):
     """解析一行 SSE，累积内容并更新当前状态 st['cur']。
     同时抓用法统计（OpenAI 的 usage.chunk / Anthropic 的 message_stop.usage）。
@@ -315,6 +331,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
         body = strip_thinking(body, self.path)
+        body = clear_think_budget(body, self.path)
         # 剥参后 body 变长，原 Content-Length 必须丢弃，urllib 会按新 data 自动重设
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
         port = pick_upstream(body)
