@@ -706,6 +706,7 @@ class Win(QMainWindow):
         self.was_proxy = None
         self.build()
         self.load_geometry()
+        self._phase_target = 0
         t = QTimer(self); t.timeout.connect(self.refresh); t.start(1000)
         tf = QTimer(self); tf.timeout.connect(self.fast_live); tf.start(200)
         self._init_dragcopy()
@@ -1017,7 +1018,7 @@ class Win(QMainWindow):
         修法：同一后端的端口共享实时视图，取其中最新的那个文件。"""
         port = ENDPOINT.rsplit(":", 1)[-1]
         # 同后端代理组：8080 网关与 8092 tee 都转发到 8082，实时视图应一致
-        group = {"8080": ["8080", "8092"], "8092": ["8080", "8092"]}.get(port, [port])
+        group = {"8080": ["8080", "8092"], "8092": ["8080", "8092"], "8081": ["8080"]}.get(port, [port])
         best, best_mt = None, -1
         for p in group:
             f = rf"D:\llama\live-{p}.txt"
@@ -1030,6 +1031,15 @@ class Win(QMainWindow):
         return best or rf"D:\llama\live-{port}.txt"
 
     def fast_live(self):
+        # 平滑过渡: 进度条每 200ms 向目标插值 35%(约5拍到达, 肉眼平滑不跳变)
+        tgt = getattr(self, "_phase_target", None)
+        if tgt is not None:
+            for b in (self.bar_phase, self.bar_ph):
+                if b.maximum() == 0:
+                    b.setRange(0, 100)
+                cur = b.value()
+                if cur != tgt:
+                    b.setValue(int(cur + (tgt - cur) * 0.35) if abs(tgt - cur) > 2 else tgt)
         try:
             txt = open(self._live_file(), encoding="utf-8").read()
         except OSError:
@@ -1183,23 +1193,13 @@ class Win(QMainWindow):
                 pp = max(5, min(99, 100 * pr // max(pt, 1)))
                 self.phase_lab.setText(f"预填充  {pr}/{pt} tok  {live.get('prefill_tok_s_mean') or 0:.0f} tok/s")
                 self.lb_phase_inline.setText("预填中")
-                # 过渡动画: 忙碌模式(系统级滑动条, 平滑不卡)
-                for b in (self.bar_phase, self.bar_ph):
-                    if b.maximum() != 0:
-                        b.setRange(0, 0)
-                        b.setTextVisible(False) if hasattr(b, "setTextVisible") else None
+                self._phase_target = pp   # 目标值; fast_live 每200ms 平滑逼近
             elif st_s == "generating":
-                for b in (self.bar_phase, self.bar_ph):
-                    if b.maximum() == 0:
-                        b.setRange(0, 100)
-                self.bar_phase.setValue(100); self.bar_ph.setValue(100)
+                self._phase_target = 100
                 self.phase_lab.setText(f"解码  {live.get('generated')}/{live.get('max_tokens')} @ {live.get('tok_s')} tok/s")
                 self.lb_phase_inline.setText(f"{live.get('tok_s') or 0:.0f} t/s")
             else:
-                for b in (self.bar_phase, self.bar_ph):
-                    if b.maximum() == 0:
-                        b.setRange(0, 100)
-                self.bar_phase.setValue(0); self.bar_ph.setValue(0)
+                self._phase_target = 0
                 self.phase_lab.setText(f"阶段  {st_s or '未知'}")
                 self.lb_phase_inline.setText("")
             # 上下文（最近请求 prompt+output / max_context）
