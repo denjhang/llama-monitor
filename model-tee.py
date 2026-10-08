@@ -40,7 +40,7 @@ COMPACT_KEYS = ("summarize the conversation", "conversation summary", "compact",
 
 def write_live(text):
     with open(LIVE, "w", encoding="utf-8") as f:
-        f.write(text[-4000:])
+        f.write(text[-12000:])
 
 def mode():
     try:

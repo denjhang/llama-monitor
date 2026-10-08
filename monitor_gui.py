@@ -1095,10 +1095,16 @@ class Win(QMainWindow):
             return
         txt = txt.replace("\\n", "\n").replace("\\t", "  ")
         lines = [l for l in txt.rstrip().splitlines() if l.strip()]
-        cur = "\n".join(lines[-6:])
+        cur = "\n".join(lines)          # 全部内容(网关侧限 12k 字符, 可上滚浏览)
         if cur and cur != self.txt_live.toPlainText():
+            sb = self.txt_live.verticalScrollBar()
+            at_bottom = sb.value() >= sb.maximum() - 40   # 用户在底部才跟随
+            prev_pos = sb.value()
             self.txt_live.setPlainText(cur)
-            sb = self.txt_live.verticalScrollBar(); sb.setValue(sb.maximum())
+            if at_bottom:
+                sb.setValue(sb.maximum())   # 跟随最新
+            else:
+                sb.setValue(prev_pos)       # 用户上滚浏览中: 保持位置
 
     # ---------- 渲染 ----------
     def _autoswitch(self, ports_stat):
