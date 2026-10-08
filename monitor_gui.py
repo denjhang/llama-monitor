@@ -474,6 +474,18 @@ def death_stats():
     return n_down, n_restart, last_verdict, last_time
 
 def uptime():
+    try:
+        import psutil
+        for pname in (EXE, "strata.exe"):
+            for pr in psutil.process_iter(["name", "create_time"]):
+                if (pr.info["name"] or "").lower() == pname.lower():
+                    return time.time() - pr.info["create_time"]
+    except Exception:
+        pass
+    return _uptime_legacy()
+
+
+def _uptime_legacy():
     import ctypes, ctypes.wintypes as wt
     k32 = ctypes.windll.kernel32
     csv = run_cmd(["tasklist", "/FI", f"IMAGENAME eq {EXE}", "/FO", "CSV", "/NH"])
@@ -663,6 +675,19 @@ def kpi_tile(caption):
     v.addWidget(cap); v.addWidget(val)
     return f, val
 
+
+def set_txt(lbl, text):
+    if lbl.text() != text:
+        lbl.setText(text)
+
+def set_fmt(bar, fmt):
+    if bar.format() != fmt:
+        bar.setFormat(fmt)
+
+def set_val(bar, v):
+    if bar.value() != v:
+        bar.setValue(v)
+
 def bar_tile(caption):
     """KPI 瓷砖：标题 + 进度条（非纯文字）"""
     f = QFrame(); f.setProperty("class", "tile")
@@ -707,7 +732,9 @@ class Win(QMainWindow):
         self.build()
         self.load_geometry()
         self._phase_target = 0
+        self._anim_targets = {"phase": 0, "ctx": 0}
         t = QTimer(self); t.timeout.connect(self.refresh); t.start(1000)
+        ta = QTimer(self); ta.timeout.connect(self._tick_anim); ta.start(16)   # 60fps 过渡
         tf = QTimer(self); tf.timeout.connect(self.fast_live); tf.start(200)
         self._init_dragcopy()
         threading.Thread(target=self.looper, daemon=True).start()
@@ -751,8 +778,8 @@ class Win(QMainWindow):
         self.t_up,  self.v_up  = kpi_tile("存活时间")
         self.t_spd, self.v_spd = kpi_tile("生成速度")
         self.t_dft, self.v_dft = kpi_tile("DRAFT 命中")
-        self.t_cb, self.bar_cb = bar_tile("上下文")
-        self.t_ph, self.bar_ph = bar_tile("阶段")
+        self.t_cb, self.bar_cb = bar_tile("CPU 占用")
+        self.t_ph, self.bar_ph = bar_tile("内存")
         for t in (self.t_up, self.t_spd, self.t_dft, self.t_cb, self.t_ph):
             kpis.addWidget(t, stretch=1)
         col.addLayout(kpis)
@@ -1030,16 +1057,38 @@ class Win(QMainWindow):
                 best, best_mt = f, mt
         return best or rf"D:\llama\live-{port}.txt"
 
-    def fast_live(self):
-        # 平滑过渡: 进度条每 200ms 向目标插值 35%(约5拍到达, 肉眼平滑不跳变)
-        tgt = getattr(self, "_phase_target", None)
-        if tgt is not None:
-            for b in (self.bar_phase, self.bar_ph):
+    def _tick_anim(self):
+        """60fps 过渡: 阶段/上下文=增长平滑+归零瞬时; CPU/内存=双向平滑"""
+        tg = getattr(self, "_anim_targets", None)
+        if not tg:
+            return
+        jobs = [((self.bar_phase,), "phase"), ((self.bar_ctx,), "ctx"), ((self.bar_ph,), "ram")]
+        for bars, key in jobs:
+            if key == "ram":
+                tgt = getattr(self, "_anim_ram", None)
+            else:
+                tgt = tg.get(key, 0)
+            if tgt is None:
+                continue
+            smooth2 = key in ("cpu", "ram")
+            for b in bars:
                 if b.maximum() == 0:
                     b.setRange(0, 100)
                 cur = b.value()
-                if cur != tgt:
-                    b.setValue(int(cur + (tgt - cur) * 0.35) if abs(tgt - cur) > 2 else tgt)
+                if cur == tgt:
+                    continue
+                if smooth2 or (tgt > 0 and tgt > cur):    # 平滑(双向 或 单向增长)
+                    nv = cur + (tgt - cur) * 0.15
+                    step = int(round(nv))
+                    if step == cur and cur != tgt:
+                        step = cur + (1 if tgt > cur else -1)
+                    b.setValue(max(0, min(100, step)))
+                    if abs(tgt - b.value()) <= 1:
+                        b.setValue(tgt)
+                else:                                      # 阶段/上下文归零/回落: 瞬时
+                    b.setValue(tgt)
+
+    def fast_live(self):
         try:
             txt = open(self._live_file(), encoding="utf-8").read()
         except OSError:
@@ -1067,6 +1116,96 @@ class Win(QMainWindow):
     def _reset_down_streak(self):
         self._down_streak = 0
 
+    def _render_strata(self, d):
+        """Strata 专属渲染: 变化才写, 与 llama.cpp 路径完全互斥(公共段已 return)"""
+        sm = d.get("strata_metrics") or {}
+        eng, live = sm.get("engine") or {}, sm.get("live") or {}
+        reqs_s = sm.get("requests") or []
+        ctx_s = eng.get("max_context") or 262144
+        r0 = reqs_s[0] if reqs_s else {}
+        ok_s = live.get("state") not in ("unloaded", None)
+        set_txt(self.lb_health, "服务正常" if ok_s else "引擎未载")
+        set_txt(self.lb_model, eng.get("model") or d.get("model") or "?")
+        set_txt(self.lb_think, "思考 关")
+        st_s = live.get("state")
+        if st_s == "reading":
+            pr, pt = live.get("prompt_read") or 0, live.get("prompt_total") or 1
+            pp = max(5, min(99, 100 * pr // max(pt, 1)))
+            set_txt(self.phase_lab, f"预填充  {pr}/{pt} tok  {live.get('prefill_tok_s_mean') or 0:.0f} tok/s")
+            set_txt(self.lb_phase_inline, "预填中")
+            self._anim_targets["phase"] = pp
+        elif st_s == "generating":
+            self._anim_targets["phase"] = 100
+            set_txt(self.phase_lab, f"解码  {live.get('generated')}/{live.get('max_tokens')} @ {live.get('tok_s')} tok/s")
+            set_txt(self.lb_phase_inline, f"{live.get('tok_s') or 0:.0f} t/s")
+        else:
+            self._anim_targets["phase"] = 0
+            set_txt(self.phase_lab, f"阶段  {st_s or '未知'}")
+            set_txt(self.lb_phase_inline, "")
+        if st_s in ("reading", "generating"):
+            used_s = (live.get("prompt_tokens") or 0) + (live.get("generated") or 0)
+        else:
+            used_s = (r0.get("prompt_total") or r0.get("prompt_tokens") or 0) + (r0.get("output_tokens") or 0)
+        pct_s = min(100, 100 * used_s // max(ctx_s, 1))
+        self._anim_targets["ctx"] = pct_s
+        set_txt(self.ctx_lab, f"上下文  {fmt_k(used_s)} / {fmt_k(ctx_s)}   ({pct_s}%)")
+        # CPU: 死区+直写(无过渡, 波动大); 内存: 死区+双向平滑
+        import psutil as _ps
+        def _db(cur, new, band=3):
+            return cur if abs(new - cur) <= band else new
+        cpu_real = int(_ps.cpu_percent(0.2))          # 阻塞实测窗口=真实总均值(None 模式有假尖峰)
+        cpu_new = _db(getattr(self, "_anim_cpu", 0), cpu_real)
+        vm = _ps.virtual_memory()
+        ram_pct_new = int(vm.percent)
+        ram_txt_new = f"{vm.used/2**30:.0f}G / {vm.total/2**30:.0f}G"
+        if cpu_new != getattr(self, "_anim_cpu", None):
+            self._anim_cpu = cpu_new
+            set_val(self.bar_cb, cpu_new)
+            set_fmt(self.bar_cb, f"CPU {cpu_new}%")
+        if ram_pct_new != getattr(self, "_anim_ram_pct", None) or ram_txt_new != getattr(self, "_ram_txt", None):
+            self._anim_ram_pct = ram_pct_new
+            self._ram_txt = ram_txt_new
+            self._anim_ram = ram_pct_new              # 动画目标
+            set_fmt(self.bar_ph, f"{ram_txt_new}")    # 直接显示 已用/总量
+        set_txt(self.v_spd, f"{r0.get('decode_tok_s') or 0:.0f}")
+        do_, da_ = r0.get("drafts_offered"), r0.get("drafts_accepted")
+        set_txt(self.v_dft, f"{da_/do_:.2f}" if do_ and da_ is not None else "—")
+        # 存活时间(数据层已算, 只是渲染补位)
+        up = d.get("up")
+        h, m = (int(up // 3600), int(up % 3600 // 60)) if up is not None else (0, 0)
+        set_txt(self.v_up, f"{h}h{m:02d}m" if up is not None else "—")
+        # GPU 显存行(数据层 vram() 已采, 渲染补位; 变化才写)
+        g = d.get("gpus") or []
+        for lab, val, bar, gp in (
+                (self.vm0_lab, self.vm0_val, self.bar_vm0, g[0] if len(g) > 0 else None),
+                (self.vm1_lab, self.vm1_val, self.bar_vm1, g[1] if len(g) > 1 else None),
+                (self.vm2_lab, self.vm2_val, self.bar_vm2, g[2] if len(g) > 2 else None),
+                (self.vm3_lab, self.vm3_val, self.bar_vm3, g[3] if len(g) > 3 else None),
+                (self.vm4_lab, self.vm4_val, self.bar_vm4, g[4] if len(g) > 4 else None)):
+            if gp:
+                pctv = 100 * gp["used"] // max(gp["tot"], 1)
+                set_txt(lab, f"GPU {gp['i']} 显存 · {gp['temp']}°C")
+                set_txt(val, f"{fmt_gb(gp['used'])} / {fmt_gb(gp['tot'])}  ({pctv}%)")
+                set_val(bar, pctv)
+            else:
+                set_txt(lab, "GPU 显存 · —"); set_txt(val, "—"); set_val(bar, 0)
+        # 请求表: 签名变化才重建
+        sig = ";".join(f"{r.get('time')},{r.get('output_tokens')}" for r in reqs_s[:12])
+        if sig != getattr(self, "_tbl_sig", None):
+            self._tbl_sig = sig
+            self.table.setRowCount(min(len(reqs_s), 50))
+            for i, r in enumerate(reqs_s[:50]):
+                acc_s = (f"{r['drafts_accepted']/r['drafts_offered']:.2f}"
+                         if r.get("drafts_offered") and r.get("drafts_accepted") is not None else "-")
+                tm = r.get("time")
+                ts_s = time.strftime("%H:%M:%S", time.localtime(tm)) if tm else "-"
+                vals = [ts_s, fmt_k(r.get("prompt_tokens")), fmt_k(r.get("output_tokens")),
+                        f"{r['decode_tok_s']:.1f}" if r.get("decode_tok_s") else "-",
+                        acc_s, fmt_k(r.get("prompt_total")), f"{r.get('duration_s') or '-'}s",
+                        str(r.get("hit_rate") if r.get("hit_rate") is not None else "-"), "✓"]
+                for j, v in enumerate(vals):
+                    self.table.setItem(i, j, QTableWidgetItem(str(v)))
+
     def refresh(self):
         d = self.data
         if not d:
@@ -1092,9 +1231,12 @@ class Win(QMainWindow):
         cur = self._cur_port_row()
         if cur >= 0:
             self.tbl_ports.selectRow(cur)
-        self.lb_clock.setText(datetime.datetime.now().strftime("%m-%d %H:%M:%S"))
-        self.lb_model.setText(d["model"])
-        self.lb_think.setText("思考 开" if d["mode"] == "think" else "思考 关")
+        set_txt(self.lb_clock, datetime.datetime.now().strftime("%m-%d %H:%M:%S"))
+        if d.get("is_strata"):
+            self._render_strata(d)
+            return
+        set_txt(self.lb_model, d["model"])
+        set_txt(self.lb_think, "思考 开" if d["mode"] == "think" else "思考 关")
 
         ok = d["running"] and d["health"]
         if ok:
@@ -1156,77 +1298,18 @@ class Win(QMainWindow):
             else:
                 lab.setText("GPU 显存 · —"); val.setText("—"); bar.setValue(0)
 
-        # 顶部瓷砖：上下文 / 阶段 进度同步
-        self.bar_cb.setValue(self.bar_ctx.value())
-        self.bar_ph.setValue(self.bar_phase.value())
-
-        # 进度条（上下文）
+        # 顶部瓷砖同步 + 上下文条(llama.cpp/SGLang 路径; Strata 已提前 return)
+        set_val(self.bar_cb, self.bar_ctx.value())
+        set_val(self.bar_ph, self.bar_phase.value())
         if sg:
             pool_pct = 100 * used // max(ctx, 1)
-            self.bar_ctx.setValue(pool_pct)
-            self.ctx_lab.setText(f"KV 池  {fmt_k(used)} / {fmt_k(ctx)}   ({pool_pct}%)  活跃请求 {sgst.get('running') or 0}")
+            set_val(self.bar_ctx, pool_pct)
+            set_txt(self.ctx_lab, f"KV 池  {fmt_k(used)} / {fmt_k(ctx)}   ({pool_pct}%)  活跃请求 {sgst.get('running') or 0}")
         else:
-            self.bar_ctx.setValue(pct)
-            self.ctx_lab.setText(f"上下文  {fmt_k(used)} / {fmt_k(ctx)}   ({pct}%)")
-        self.bar_cb.setValue(self.bar_ctx.value())
-        self.bar_cb.setFormat(fmt_k(used) + " / " + fmt_k(ctx) + "  %p%")
-
-        # ---- Strata 引擎分支: 数据源 = 官方 /metrics (serve/server.py:2586) ----
-        if d.get("is_strata"):
-            sm = d.get("strata_metrics") or {}
-            eng = sm.get("engine") or {}
-            live = sm.get("live") or {}
-            reqs_s = sm.get("requests") or []
-            ctx_s = eng.get("max_context") or 262144
-            r0 = reqs_s[0] if reqs_s else {}
-            # 状态胶囊
-            ok_s = live.get("state") not in ("unloaded", None)
-            self.lb_health.setText("服务正常" if ok_s else "引擎未载")
-            self.lb_health.setProperty("class", "pill_ok" if ok_s else "pill_bad")
-            self.lb_health.style().unpolish(self.lb_health); self.lb_health.style().polish(self.lb_health)
-            self.lb_model.setText(eng.get("model") or d.get("model") or "?")
-            self.lb_think.setText("思考 关")
-            # 阶段（官方 state 机）
-            st_s = live.get("state")
-            if st_s == "reading":
-                pr, pt = live.get("prompt_read") or 0, live.get("prompt_total") or 1
-                pp = max(5, min(99, 100 * pr // max(pt, 1)))
-                self.phase_lab.setText(f"预填充  {pr}/{pt} tok  {live.get('prefill_tok_s_mean') or 0:.0f} tok/s")
-                self.lb_phase_inline.setText("预填中")
-                self._phase_target = pp   # 目标值; fast_live 每200ms 平滑逼近
-            elif st_s == "generating":
-                self._phase_target = 100
-                self.phase_lab.setText(f"解码  {live.get('generated')}/{live.get('max_tokens')} @ {live.get('tok_s')} tok/s")
-                self.lb_phase_inline.setText(f"{live.get('tok_s') or 0:.0f} t/s")
-            else:
-                self._phase_target = 0
-                self.phase_lab.setText(f"阶段  {st_s or '未知'}")
-                self.lb_phase_inline.setText("")
-            # 上下文（最近请求 prompt+output / max_context）
-            used_s = (r0.get("prompt_tokens") or 0) + (r0.get("output_tokens") or 0)
-            pct_s = min(100, 100 * used_s // max(ctx_s, 1))
-            self.bar_ctx.setValue(pct_s)
-            self.ctx_lab.setText(f"上下文  {fmt_k(used_s)} / {fmt_k(ctx_s)}   ({pct_s}%)")
-            self.bar_cb.setValue(pct_s)
-            self.bar_cb.setFormat(fmt_k(used_s) + " / " + fmt_k(ctx_s))
-            # KPI
-            self.v_spd.setText(f"{r0.get('decode_tok_s') or 0:.0f}")
-            do_, da_ = r0.get("drafts_offered"), r0.get("drafts_accepted")
-            self.v_dft.setText(f"{da_/do_:.2f}" if do_ and da_ is not None else "—")
-            # 请求表（官方 requests[], 最新在前）
-            self.table.setRowCount(min(len(reqs_s), 50))
-            for i, r in enumerate(reqs_s[:50]):
-                acc_s = (f"{r['drafts_accepted']/r['drafts_offered']:.2f}"
-                         if r.get("drafts_offered") and r.get("drafts_accepted") is not None else "-")
-                tm = r.get("time")
-                ts_s = time.strftime("%H:%M:%S", time.localtime(tm)) if tm else "-"
-                vals = [ts_s, fmt_k(r.get("prompt_tokens")), fmt_k(r.get("output_tokens")),
-                        f"{r['decode_tok_s']:.1f}" if r.get("decode_tok_s") else "-",
-                        acc_s, "-", f"{r.get('duration_s') or '-'}s",
-                        str(r.get("hit_rate") if r.get("hit_rate") is not None else "-"), "✓"]
-                for j, v in enumerate(vals):
-                    self.table.setItem(i, j, QTableWidgetItem(str(v)))
-            return
+            set_val(self.bar_ctx, pct)
+            set_txt(self.ctx_lab, f"上下文  {fmt_k(used)} / {fmt_k(ctx)}   ({pct}%)")
+        set_val(self.bar_cb, self.bar_ctx.value())
+        set_fmt(self.bar_cb, fmt_k(used) + " / " + fmt_k(ctx) + "  %p%")
 
         # 阶段判定（源码级）：/slots is_processing + /metrics gauge
         #   预填充 = 处理中且 prompt_tokens_seconds > 0

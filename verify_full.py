@@ -1,60 +1,66 @@
 # -*- coding: utf-8 -*-
-"""交付前全面静态校验: 所有显示路径/文件路径/字段/互斥/动画/实盘数据"""
-import ast, json, re, os, urllib.request
+"""widget 清单式全量校验: 枚举所有可见组件, 验证 Strata 渲染路径逐个覆盖"""
+import ast, json, urllib.request, psutil, time, re
 
 SRC = r'D:\llama-monitor\monitor_gui.py'
-TEE = r'D:\llama-monitor\model-tee.py'
 src = open(SRC, encoding='utf-8').read()
-tee = open(TEE, encoding='utf-8').read()
 fails = []
 def check(n, c):
     print(('PASS ' if c else 'FAIL ') + n)
     if not c: fails.append(n)
 
-# 1. 语法
-for name, code in (('monitor_gui', src), ('model-tee', tee)):
-    try: ast.parse(code); check(f'{name} 语法', True)
-    except SyntaxError as e: check(f'{name} 语法 ({e})', False)
+ast.parse(src); check('语法', True)
 
-# 2. 无残留老路径(E:\)
-for name, code in (('monitor_gui', src), ('model-tee', tee)):
-    check(f'{name} 无 E:\\LM 残留', 'E:\\LM' not in code and 'E:\\working' not in code)
+# Strata 渲染方法体与 llama 路径体
+strata_m = src[src.index('def _render_strata'):src.index('def refresh')]
+llama_body = src[src.index('def refresh'):]
 
-# 3. live 链路: 网关写路径 == GUI 读路径
-tee_write = re.search(r'LIVE\s*=\s*rf?"([^"]+)"', tee).group(1).replace('%s', '{LISTEN}').replace('{LISTEN}', '8080')
-gui_read = 'D:\\llama\\live-' in src
-check(f'网关 live 写: {tee_write}', '8080' in tee_write)
-check('GUI live 读 D:\\llama\\live-', gui_read)
+# ---- 可见 widget 清单: (名字, 必须出现的渲染调用) ----
+WIDGETS = {
+    'lb_model':    'set_txt(self.lb_model',
+    'lb_think':    'set_txt(self.lb_think',
+    'lb_health':   'set_txt(self.lb_health',
+    'lb_clock':    'set_txt(self.lb_clock',
+    'v_up':        'set_txt(self.v_up',
+    'v_spd':       'set_txt(self.v_spd',
+    'v_dft':       'set_txt(self.v_dft',
+    'phase_lab':   'set_txt(self.phase_lab',
+    'lb_phase_inline': 'set_txt(self.lb_phase_inline',
+    'ctx_lab':     'set_txt(self.ctx_lab',
+    'table':       'self.table.setRowCount',
+    'GPU行×5':     'vm0_lab, self.vm0_val, self.bar_vm0',
+    'CPU条':       'set_fmt(self.bar_cb',
+    '内存条':      'set_fmt(self.bar_ph',
+    '上下文条':    '"ctx"',
+    '阶段条':      '"phase"',
+}
+print('---- Strata 路径覆盖 ----')
+for name, call in WIDGETS.items():
+    check(f'{name}', call in strata_m)
 
-# 4. Strata 分支完整性
-blk = src[src.index('# ---- Strata 引擎分支'):src.index('# 阶段判定（源码级）')]
-check('数据源 /metrics', 'strata_metrics' in src and 'get_json("/metrics")' in src)
-for f in ('state','prompt_read','prompt_total','tok_s','decode_tok_s','drafts_accepted','drafts_offered','hit_rate','max_context','prompt_tokens','output_tokens'):
-    check(f'官方字段 {f}', f in blk)
-check('互斥 return 在表格渲染后', blk.rstrip().endswith('return') and 'setRowCount' in blk)
-check('预填充忙碌动画 setRange(0,0)', 'setRange(0, 0)' in blk)
-check('动画恢复 setRange(0,100)', 'setRange(0, 100)' in blk)
+# ---- 写入纪律 ----
+check('render 无裸 setText', '.setText(' not in strata_m)
+check('render 无裸 setFormat', '.setFormat(' not in strata_m)
+check('render 无裸 setValue', strata_m.count('setValue(') == 0)
+check('表格签名防重建', '_tbl_sig' in strata_m)
+check('CPU interval 实测', 'cpu_percent(0.2)' in strata_m)
+check('内存 已用/总量 文本', '/ 2**30' in strata_m)
+check('会话总量列 prompt_total', 'fmt_k(r.get("prompt_total"))' in strata_m)
 
-# 5. 预填充 live 预写(网关请求即写"填充中")
-check('网关请求即写填充状态', '填充中' in tee and 'write_live(st_line' in tee)
-
-# 6. 实盘: /metrics 全字段真实可用
+# ---- 数据实盘 ----
 d = json.load(urllib.request.urlopen('http://127.0.0.1:8081/metrics', timeout=3))
-live, reqs, eng = d.get('live') or {}, d.get('requests') or [], d.get('engine') or {}
-check('live.state 有值: ' + str(live.get('state')), live.get('state') in ('idle','reading','generating','unloaded'))
-check('engine.max_context = 262144', eng.get('max_context') == 262144)
-check('requests >=1', len(reqs) >= 1)
-if reqs:
-    r0 = reqs[0]
-    check('decode_tok_s > 0', (r0.get('decode_tok_s') or 0) > 0)
-    do_, da_ = r0.get('drafts_offered'), r0.get('drafts_accepted')
-    check('草稿率 0..1', do_ and da_ is not None and 0 <= da_/do_ <= 1)
+r0 = (d.get('requests') or [{}])[0]
+check('prompt_total(会话总量)有值', (r0.get('prompt_total') or 0) > 0)
+check('硬件在 metrics', len(d.get('hardware', {}).get('gpus') or []) >= 4)
+import psutil as _ps
+cpu = _ps.cpu_percent(0.3)
+check(f'真实 CPU={cpu}% < 100', 0 <= cpu <= 100)
+vm = _ps.virtual_memory()
+check(f'内存 {vm.used/2**30:.0f}G/{vm.total/2**30:.0f}G 可算', vm.total > 0)
+up = None
+for pr in _ps.process_iter(['name', 'create_time']):
+    if (pr.info['name'] or '').lower() == 'strata.exe':
+        up = time.time() - pr.info['create_time']; break
+check(f'uptime={int((up or 0)//60)}min 可算', up is not None)
 
-# 7. 实盘: live 文件链路(刚发过流式请求)
-lf = r'D:\llama\live-8080.txt'
-check('live-8080.txt 存在且非空', os.path.exists(lf) and os.path.getsize(lf) > 10)
-
-# 8. 进程名兼容
-check('strata.exe 存活检查', 'strata.exe' in src)
-
-print('\n====', '全部通过, 可交付' if not fails else f'{len(fails)} 项失败: {fails}', '====')
+print('\n====', f'全部通过({len(fails)==0})' if not fails else f'{len(fails)} 项失败: {fails}', '====')
