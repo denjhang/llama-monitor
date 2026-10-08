@@ -17,14 +17,15 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QSizePolicy, QGridLayout, QPushButton, QDialog,
                                QRubberBand, QComboBox, QCheckBox, QScrollArea)
 
-# 可监控端口表（三模型驻留版）
+# 可监控端口表（Strata 42t/s 主力 + llama.cpp 备用）
 PORTS = {
+    "8081 · Strata Flash-Next": ("http://127.0.0.1:8081", r"E:\strata-src\strata-iq3_s.log", "Strata引擎+GPU专家缓存+MTP 42t/s"),
     "8082 · qwen3.8-27b":     ("http://127.0.0.1:8082", r"D:\llama\server-qwen38-27b.err.log", "27B治疗版+DFlash2草稿+视觉"),
-    "8085 · qwen3.6-35b-a3b": ("http://127.0.0.1:8085", r"D:\llama\server-qwen36-35b.err.log", "35B-A3B蒸馏+内置MTP+视觉"),
-    "8086 · spark-x25-4b":    ("http://127.0.0.1:8086", r"D:\llama\server-spark-x25.err.log", "星火X2.5-4B轻量"),
+    "8083 · 备用槽位":        ("http://127.0.0.1:8083", r"D:\llama\ik-glm.log", "备用"),
+    "8086 · gemma-4-e4b":     ("http://127.0.0.1:8086", r"D:\llama\server-gemma4.err.log", "多模态轻量"),
 }
-ENDPOINT   = PORTS["8082 · qwen3.8-27b"][0]
-SERVER_LOG = PORTS["8082 · qwen3.8-27b"][1]
+ENDPOINT   = PORTS["8081 · Strata Flash-Next"][0]
+SERVER_LOG = PORTS["8081 · Strata Flash-Next"][1]
 LIVE_FILE  = r"D:\llama\live-gen.txt"
 EVENTS_LOG = r"D:\llama\watchdog-events.log"
 MODE_FILE  = r"D:\llama\server-mode.txt"
@@ -65,6 +66,8 @@ NGEN_RE = re.compile(r"task (\d+) \|\s+n_gen =\s+(\d+), tg =\s+([\d.]+) t/s, tg_
 REQ_RE  = re.compile(r"task (\d+) \|\s+prompt eval time =\s+[\d.]+ ms /\s+(\d+) tokens")
 GEN_RE  = re.compile(r"task (\d+) \|\s+eval time =\s+[\d.]+ ms /\s+(\d+) tokens \(\s+[\d.]+ ms per token,\s+([\d.]+) tokens per second\)")
 ACC_RE  = re.compile(r"task (\d+) \|\s+draft acceptance = ([\d.]+)")
+# Strata 引擎日志: "strata serve: prompt N tokens = ... read in X ms (A tok/s), M generated in Y s (B tok/s), drafts accepted C of D"
+STRATA_RE = re.compile(r"prompt (\d+) tokens .*?\+ \d+ read in \d+ ms \([\d.]+ tok/s\), (\d+) generated in \d+ ms \(([\d.]+) tok/s\), drafts accepted (\d+) of (\d+)")
 TOT_RE  = re.compile(r"task (\d+) \|\s+total time =\s+([\d.]+) ms")
 STOP_RE = re.compile(r"release: id\s+\d+ \|\s+task (\d+) \|\s+stop processing: n_tokens = (\d+)")
 ERR_RE  = re.compile(r"got exception: (.{0,100})")
@@ -85,6 +88,17 @@ _port_cache = {}
 _port_fail = {}
 # 预填充进度分母冻结：本次预填开场以来最大的 已填+剩余（≈prompt 总长），离开预填清零
 _PREFILL_STATE = {"total": 0}
+
+def is_strata(model_info=None):
+    """8081 = Strata 引擎（无 /slots、llama.cpp 版 /metrics；数据走自身日志与 /v1/models）"""
+    port = ENDPOINT.rsplit(":", 1)[-1]
+    if port == "8081":
+        return True
+    m = model_info if model_info is not None else get_json("/v1/models")
+    try:
+        return bool(m and m.get("data") and "iq3_s" in (m["data"][0].get("id") or ""))
+    except Exception:
+        return False
 
 def is_sglang(model_info=None):
     """8092 tee 直连 SGLang；8080 网关在其后端是 SGLang 时也按 SGLang 解析
@@ -256,9 +270,9 @@ def recent_requests_sglang(n=50):
     按时间倒序取真实推理行。流量走哪个代理就写哪个文件，
     监控看哪个端口都应看到同一份真实流量。"""
     usage_files = [
-        r"E:\LM\tee-usage-8080.jsonl",
-        r"E:\LM\tee-usage-8092.jsonl",
-        r"E:\LM\sglang-usage.jsonl",
+        r"D:\llama\tee-usage-8080.jsonl",
+        r"D:\llama\tee-usage-8092.jsonl",
+        r"D:\llama\sglang-usage.jsonl",
     ]
     rows = []
     for usage_file in usage_files:
@@ -374,6 +388,16 @@ def recent_requests(n=50):
     import time as _t
     boot = _t.time() - up_base
     for l in log_tail(600):
+        ms = STRATA_RE.search(l)
+        if ms:
+            import time as _t2
+            tid = "st" + ms.group(1) + ms.group(2) + str(len(order))
+            reqs[tid] = {"pt": int(ms.group(1)), "ct": int(ms.group(2)),
+                         "tps": float(ms.group(3)),
+                         "acc": int(ms.group(4)) / max(int(ms.group(5)), 1),
+                         "ts": _t2.strftime("%H:%M:%S")}
+            order.append(tid)
+            continue
         m = REQ_RE.search(l)
         if m and m.group(1) not in reqs:
             tid = m.group(1)
@@ -417,7 +441,10 @@ def last_error():
     return ""
 
 def server_running():
-    return EXE.lower() in run_cmd(["tasklist", "/FI", f"IMAGENAME eq {EXE}"]).lower()
+    for exe in (EXE, "strata.exe"):
+        if exe.lower() in run_cmd(["tasklist", "/FI", f"IMAGENAME eq {exe}"]).lower():
+            return True
+    return False
 
 def vram():
     out = run_cmd(["nvidia-smi", "--query-gpu=index,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw",
@@ -477,7 +504,7 @@ def restart_server():
     except OSError:
         mode = "think"
     arg = ["nothink"] if mode == "nothink" else []
-    subprocess.Popen(["pythonw", r"E:\working\llama-cpp\llama\server-headless.pyw"] + arg,
+    subprocess.Popen(["pythonw", r"D:\llama-monitor\server-headless.pyw"] + arg,
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 def restart_proxy():
@@ -570,6 +597,9 @@ def collect():
     m = get_json("/v1/models")
     sg = is_sglang(m)
     d["is_sglang"] = sg
+    d["is_strata"] = (not sg) and is_strata(m)
+    if d["is_strata"]:
+        d["strata_metrics"] = get_json("/metrics") or {}
     d["model"] = os.path.basename(m["data"][0]["id"]) if m and m.get("data") else "?"
     d["gpus"] = vram()
     try:
@@ -964,7 +994,7 @@ class Win(QMainWindow):
             except Exception as e:
                 import traceback
                 try:
-                    with open(r"E:\LM\gui-errors.log", "a", encoding="utf-8") as f:
+                    with open(r"D:\llama\gui-errors.log", "a", encoding="utf-8") as f:
                         f.write(traceback.format_exc() + "\n")
                 except Exception:
                     pass
@@ -990,14 +1020,14 @@ class Win(QMainWindow):
         group = {"8080": ["8080", "8092"], "8092": ["8080", "8092"]}.get(port, [port])
         best, best_mt = None, -1
         for p in group:
-            f = rf"E:\LM\live-{p}.txt"
+            f = rf"D:\llama\live-{p}.txt"
             try:
                 mt = os.path.getmtime(f)
             except OSError:
                 continue
             if mt > best_mt:
                 best, best_mt = f, mt
-        return best or rf"E:\LM\live-{port}.txt"
+        return best or rf"D:\llama\live-{port}.txt"
 
     def fast_live(self):
         try:
@@ -1130,6 +1160,73 @@ class Win(QMainWindow):
             self.ctx_lab.setText(f"上下文  {fmt_k(used)} / {fmt_k(ctx)}   ({pct}%)")
         self.bar_cb.setValue(self.bar_ctx.value())
         self.bar_cb.setFormat(fmt_k(used) + " / " + fmt_k(ctx) + "  %p%")
+
+        # ---- Strata 引擎分支: 数据源 = 官方 /metrics (serve/server.py:2586) ----
+        if d.get("is_strata"):
+            sm = d.get("strata_metrics") or {}
+            eng = sm.get("engine") or {}
+            live = sm.get("live") or {}
+            reqs_s = sm.get("requests") or []
+            ctx_s = eng.get("max_context") or 262144
+            r0 = reqs_s[0] if reqs_s else {}
+            # 状态胶囊
+            ok_s = live.get("state") not in ("unloaded", None)
+            self.lb_health.setText("服务正常" if ok_s else "引擎未载")
+            self.lb_health.setProperty("class", "pill_ok" if ok_s else "pill_bad")
+            self.lb_health.style().unpolish(self.lb_health); self.lb_health.style().polish(self.lb_health)
+            self.lb_model.setText(eng.get("model") or d.get("model") or "?")
+            self.lb_think.setText("思考 关")
+            # 阶段（官方 state 机）
+            st_s = live.get("state")
+            if st_s == "reading":
+                pr, pt = live.get("prompt_read") or 0, live.get("prompt_total") or 1
+                pp = max(5, min(99, 100 * pr // max(pt, 1)))
+                self.phase_lab.setText(f"预填充  {pr}/{pt} tok  {live.get('prefill_tok_s_mean') or 0:.0f} tok/s")
+                self.lb_phase_inline.setText("预填中")
+                # 过渡动画: 忙碌模式(系统级滑动条, 平滑不卡)
+                for b in (self.bar_phase, self.bar_ph):
+                    if b.maximum() != 0:
+                        b.setRange(0, 0)
+                        b.setTextVisible(False) if hasattr(b, "setTextVisible") else None
+            elif st_s == "generating":
+                for b in (self.bar_phase, self.bar_ph):
+                    if b.maximum() == 0:
+                        b.setRange(0, 100)
+                self.bar_phase.setValue(100); self.bar_ph.setValue(100)
+                self.phase_lab.setText(f"解码  {live.get('generated')}/{live.get('max_tokens')} @ {live.get('tok_s')} tok/s")
+                self.lb_phase_inline.setText(f"{live.get('tok_s') or 0:.0f} t/s")
+            else:
+                for b in (self.bar_phase, self.bar_ph):
+                    if b.maximum() == 0:
+                        b.setRange(0, 100)
+                self.bar_phase.setValue(0); self.bar_ph.setValue(0)
+                self.phase_lab.setText(f"阶段  {st_s or '未知'}")
+                self.lb_phase_inline.setText("")
+            # 上下文（最近请求 prompt+output / max_context）
+            used_s = (r0.get("prompt_tokens") or 0) + (r0.get("output_tokens") or 0)
+            pct_s = min(100, 100 * used_s // max(ctx_s, 1))
+            self.bar_ctx.setValue(pct_s)
+            self.ctx_lab.setText(f"上下文  {fmt_k(used_s)} / {fmt_k(ctx_s)}   ({pct_s}%)")
+            self.bar_cb.setValue(pct_s)
+            self.bar_cb.setFormat(fmt_k(used_s) + " / " + fmt_k(ctx_s))
+            # KPI
+            self.v_spd.setText(f"{r0.get('decode_tok_s') or 0:.0f}")
+            do_, da_ = r0.get("drafts_offered"), r0.get("drafts_accepted")
+            self.v_dft.setText(f"{da_/do_:.2f}" if do_ and da_ is not None else "—")
+            # 请求表（官方 requests[], 最新在前）
+            self.table.setRowCount(min(len(reqs_s), 50))
+            for i, r in enumerate(reqs_s[:50]):
+                acc_s = (f"{r['drafts_accepted']/r['drafts_offered']:.2f}"
+                         if r.get("drafts_offered") and r.get("drafts_accepted") is not None else "-")
+                tm = r.get("time")
+                ts_s = time.strftime("%H:%M:%S", time.localtime(tm)) if tm else "-"
+                vals = [ts_s, fmt_k(r.get("prompt_tokens")), fmt_k(r.get("output_tokens")),
+                        f"{r['decode_tok_s']:.1f}" if r.get("decode_tok_s") else "-",
+                        acc_s, "-", f"{r.get('duration_s') or '-'}s",
+                        str(r.get("hit_rate") if r.get("hit_rate") is not None else "-"), "✓"]
+                for j, v in enumerate(vals):
+                    self.table.setItem(i, j, QTableWidgetItem(str(v)))
+            return
 
         # 阶段判定（源码级）：/slots is_processing + /metrics gauge
         #   预填充 = 处理中且 prompt_tokens_seconds > 0
