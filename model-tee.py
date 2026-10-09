@@ -6,7 +6,7 @@
 - nothink 模式下剥掉请求级思考参数（防客户端覆盖）
 - usage 流水 tee-usage.jsonl
 """
-import http.server, json, os, re, time, urllib.request, urllib.error
+import http.server, json, os, re, time, threading, urllib.request, urllib.error
 
 import sys as _sys
 _args = _sys.argv[1:]
@@ -38,9 +38,24 @@ urllib.request.urlopen = lambda req, *a, **k: _opener.open(req, *a, **k)
 COMPACT_KEYS = ("summarize the conversation", "conversation summary", "compact",
                 "历史对话", "压缩", "总结以上对话", "生成摘要")
 
-def write_live(text):
-    with open(LIVE, "w", encoding="utf-8") as f:
-        f.write(text[-12000:])
+_live_lock = threading.Lock()
+
+def write_live(text, port=None):
+    """并发写 live 的两个坑（2026-10-09 断流事故）：
+    1) 无锁并发打开同一文件，Windows 共享冲突抛异常直接炸掉转发线程 → 客户端断流。
+    2) 多后端混写一个文件，监控分不清是谁的输出。
+    修法：加锁 + 按上游端口分文件（live-8080-<upstream>.txt），聚合文件保留兼容。"""
+    text = text[-12000:]
+    files = [LIVE]
+    if port:
+        files.append(rf"D:\llama\live-{LISTEN}-{port}.txt")
+    with _live_lock:
+        for f_path in files:
+            try:
+                with open(f_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+            except OSError:
+                pass
 
 def mode():
     try:
@@ -327,7 +342,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 d0 = json.loads(body)
                 st_line, preview = classify_request(d0)
-                write_live(st_line + ("\n" + preview[:2000] if preview else ""))
+                write_live(st_line + ("\n" + preview[:2000] if preview else ""), port)
             except Exception:
                 pass
         body = strip_thinking(body, self.path)
@@ -379,7 +394,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             nonlocal last_flush
             if time.time() - last_flush > 0.15:
                 head = st["cur"] + "\n" if st["cur"] else ""
-                write_live(head + "".join(out_txt))
+                write_live(head + "".join(out_txt), port)
                 last_flush = time.time()
         while True:
             chunk = up.read(1024)
@@ -417,7 +432,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
         txt = "".join(out_txt)
         if txt:
-            write_live((st["cur"] + "\n" if st["cur"] else "") + txt)
+            write_live((st["cur"] + "\n" if st["cur"] else "") + txt, port)
         # 写监控可读的 usage 记录：含真实 token 数 / ttft / tps（与 tee 格式对齐）
         elapsed = time.time() - t_req
         rec = {"ts": time.strftime("%H:%M:%S"), "path": self.path, "stream": stream,
