@@ -14,8 +14,8 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QLabel, QProgressBar, QTableWidget,
                                QTableWidgetItem, QHeaderView, QFrame, QTextEdit,
-                               QSizePolicy, QGridLayout, QPushButton, QDialog,
-                               QRubberBand, QComboBox, QCheckBox, QScrollArea)
+                               QPushButton,
+                               QRubberBand, QCheckBox, QScrollArea)
 
 # 可监控端口表（Strata 42t/s 主力 + llama.cpp 备用）
 PORTS = {
@@ -198,7 +198,7 @@ def sglang_stats():
         m = SG_DECODE.search(l)
         if not m:
             continue
-        running, used, alen, arate, tps = (int(m.group(1)), int(m.group(2)),
+        _running, used, alen, arate, tps = (int(m.group(1)), int(m.group(2)),
                                            float(m.group(3)), float(m.group(4)), float(m.group(5)))
         mt = SG_TS.match(l)
         ts = mt.group(1) if mt else None
@@ -474,16 +474,23 @@ def death_stats():
     return n_down, n_restart, last_verdict, last_time
 
 def uptime():
+    """端口感知版: 按监听端口找进程算存活时间。
+    2026-10-10 修复: 旧版按 EXE->strata 顺序盲找, 8081 视图在 8083 的 llama-server
+    活着时显示的是星火的启动时间; 多 llama-server 也分不清。"""
+    port = ENDPOINT.rsplit(":", 1)[-1]
     try:
         import psutil
-        for pname in (EXE, "strata.exe"):
+        # 8081 = Strata 引擎; 其余 = 占住该端口的 llama-server
+        if port == "8081":
             for pr in psutil.process_iter(["name", "create_time"]):
-                if (pr.info["name"] or "").lower() == pname.lower():
+                if (pr.info["name"] or "").lower() == "strata.exe":
                     return time.time() - pr.info["create_time"]
+        for c in psutil.net_connections(kind="tcp"):
+            if c.laddr and c.laddr.port == int(port) and c.status == psutil.CONN_LISTEN and c.pid:
+                return time.time() - psutil.Process(c.pid).create_time()
     except Exception:
         pass
     return _uptime_legacy()
-
 
 def _uptime_legacy():
     import ctypes, ctypes.wintypes as wt
