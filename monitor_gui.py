@@ -1192,7 +1192,13 @@ class Win(QMainWindow):
         vm = _ps.virtual_memory()
         ram_pct_new = int(vm.percent)
         ram_txt_new = f"{vm.used/2**30:.0f}G / {vm.total/2**30:.0f}G"
-        if ram_pct_new != getattr(self, "_anim_ram_pct", None) or ram_txt_new != getattr(self, "_ram_txt", None):
+        # 死区: 内存百分比天然每秒漂 ±1%（缓存 churn），不定死区会让平滑器每秒追一次
+        # 目标 -> 内存条常驻"每秒刷新动画"（2026-10-10 用户报障）。波动 <2% 且文本相同才跳过。
+        _old_pct = getattr(self, "_anim_ram_pct", None)
+        if (_old_pct is not None and ram_txt_new == getattr(self, "_ram_txt", None)
+                and abs(ram_pct_new - _old_pct) < 2):
+            pass
+        elif ram_pct_new != _old_pct or ram_txt_new != getattr(self, "_ram_txt", None):
             self._anim_ram_pct = ram_pct_new
             self._ram_txt = ram_txt_new
             self._anim_ram = ram_pct_new              # 动画目标
