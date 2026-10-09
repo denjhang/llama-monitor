@@ -16,11 +16,11 @@ if len(_args) >= 2:
     ROUTES = [("", int(_args[1]))]          # "" 恒匹配 → 全部转发该上游
     DEFAULT_PORT = int(_args[1])
 else:
-    ROUTES = [("27b", 8082), ("gemma", 8086)]   # 模型名关键词 → 端口（27B 默认 8082）
+    ROUTES = [("27b", 8082), ("gemma", 8086), ("spark", 8083)]   # 模型名关键词 → 端口（27B 默认 8082）
     # 默认上游 = 27B（llama.cpp / SGLang 都在 8082，二者互斥）；可用 TEE_DEFAULT_PORT 覆盖
     DEFAULT_PORT = int(os.environ.get("TEE_DEFAULT_PORT", "8081"))
 GATEWAY = len(_args) == 1   # 单参启动 = 网关（多后端按 model 路由 + /v1/models 聚合）
-PORT_NAMES = {8081: "flash-next-42ts", 8082: "qwen3.8-27b", 8086: "gemma-4-e4b"}
+PORT_NAMES = {8081: "flash-next-42ts", 8082: "qwen3.8-27b", 8086: "gemma-4-e4b", 8083: "sharp-spark-4b"}
 # 对外绑定：网关默认 0.0.0.0（局域网可直连），单上游保持回环；均可用 TEE_HOST 覆盖
 TEE_HOST = os.environ.get("TEE_HOST") or ("0.0.0.0" if GATEWAY else "127.0.0.1")
 # 上游需要的鉴权 token：SGLang 用 --api-key，网关替客户端补上（key=端口）
