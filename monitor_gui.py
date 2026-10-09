@@ -580,7 +580,7 @@ def collect():
     now = time.time()
 
     def probe_cached(item):
-        pass
+        name, meta = item; role = (meta[2], meta[3]) if len(meta) == 4 else meta[2]
         last = _port_cache.get(name)
         if last is not None and last[0] is False and now - last[1] < 60:
             return {"name": name, "alive": False, "model": "", "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "_cached": True}
