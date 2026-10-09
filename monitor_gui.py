@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 PORTS = {
     "8081 · Strata Flash-Next": ("http://127.0.0.1:8081", r"E:\strata-src\strata-iq3_s.log", "Strata", "42 t/s @262K"),
     "8082 · qwen3.8-27b":     ("http://127.0.0.1:8082", r"D:\llama\server-qwen38-27b.err.log", "ik_llama+DFlash2", "~12 t/s"),
-    "8083 · Sharp-Spark-4B":   ("http://127.0.0.1:8083", r"D:\llama\server-sharpspark.log", "llama.cpp(无草稿)", "64-90 t/s @61K"),
+    "8083 · Sharp-Spark-4B":   ("http://127.0.0.1:8083", r"D:\llama\server-sparktherapy.log", "llama.cpp(无草稿)", "64-90 t/s @61K"),
     "8086 · gemma-4-e4b":     ("http://127.0.0.1:8086", r"D:\llama\server-gemma4.err.log", "llama.cpp", "~70 t/s"),
 }
 ENDPOINT   = PORTS["8081 · Strata Flash-Next"][0]
@@ -1251,7 +1251,9 @@ class Win(QMainWindow):
         d = self.data
         if not d:
             return
-        if not (d.get("health")):
+        _cur_alive = next((p["alive"] for p in (d.get("ports_stat") or [])
+                           if PORTS.get(p["name"], (None,))[0] == ENDPOINT), None)
+        if not (d.get("health") or _cur_alive):
             self._autoswitch(d.get("ports_stat") or [])
         else:
             self._reset_down_streak()
