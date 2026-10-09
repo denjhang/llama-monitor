@@ -1062,11 +1062,8 @@ class Win(QMainWindow):
         # 网关按上游端口分文件（live-8080-<upstream>.txt）：点哪个端口看哪个模型的输出，
         # 多模型并行时不再混流。选中端口有专文件且比聚合文件新就用专文件。
         per_port = rf"D:\llama\live-8080-{port}.txt"
-        try:
-            if os.path.getmtime(per_port) >= os.path.getmtime(r"D:\llama\live-8080.txt"):
-                return per_port
-        except OSError:
-            pass
+        if port != "8080" and os.path.exists(per_port):
+            return per_port
         # 同后端代理组：8080 网关与 8092 tee 都转发到 8082，实时视图应一致
         group = {"8080": ["8080", "8092"], "8092": ["8080", "8092"], "8081": ["8080"]}.get(port, [port])
         best, best_mt = None, -1
