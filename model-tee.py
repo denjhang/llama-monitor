@@ -6,7 +6,7 @@
 - nothink 模式下剥掉请求级思考参数（防客户端覆盖）
 - usage 流水 tee-usage.jsonl
 """
-import http.server, json, os, re, time, threading, urllib.request, urllib.error
+import http.server, json, os, time, threading, urllib.request, urllib.error
 
 import sys as _sys
 _args = _sys.argv[1:]
@@ -337,6 +337,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_models()
             return
         is_chat = "/chat/completions" in self.path or "/messages" in self.path
+        body = strip_thinking(body, self.path)
+        body = clear_think_budget(body, self.path)
+        # 剥参后 body 变长，原 Content-Length 必须丢弃，urllib 会按新 data 自动重设
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
+        port = pick_upstream(body)
         # 请求阶段：状态预判（填充/读图/压缩）写 live 区
         if is_chat and body:
             try:
@@ -345,11 +350,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 write_live(st_line + ("\n" + preview[:2000] if preview else ""), port)
             except Exception:
                 pass
-        body = strip_thinking(body, self.path)
-        body = clear_think_budget(body, self.path)
-        # 剥参后 body 变长，原 Content-Length 必须丢弃，urllib 会按新 data 自动重设
-        headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
-        port = pick_upstream(body)
         # 网关是唯一鉴权边界：后端要 key 时一律用网关自己的 key 覆盖客户端传来的
         # （客户端填什么 key 都行——填 123 也行；不能把客户端的 key 原样转发，否则被后端 401）
         if port in UPSTREAM_KEYS:
@@ -371,7 +371,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self.send_response(up.status)
         stream = "text/event-stream" in (up.headers.get("Content-Type") or "")
-        up_len = up.headers.get("Content-Length")
         for k, v in up.headers.items():
             if k.lower() in ("transfer-encoding", "connection"):
                 continue
@@ -387,7 +386,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
 
-        raw_buf, sse_buf, out_txt, t0 = [], [], [], time.time()
+        raw_buf, sse_buf, out_txt = [], [], []
         st = {"cur": ""}   # 当前解码状态
         last_flush = 0.0
         def flush_live():
