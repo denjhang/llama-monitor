@@ -19,10 +19,10 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 
 # 可监控端口表（Strata 42t/s 主力 + llama.cpp 备用）
 PORTS = {
-    "8081 · Strata Flash-Next": ("http://127.0.0.1:8081", r"E:\strata-src\strata-iq3_s.log", "Strata引擎+GPU专家缓存+MTP 42t/s"),
-    "8082 · qwen3.8-27b":     ("http://127.0.0.1:8082", r"D:\llama\server-qwen38-27b.err.log", "27B治疗版+DFlash2草稿+视觉"),
-    "8083 · Sharp-Spark-4B":   ("http://127.0.0.1:8083", r"D:\llama\server-sharpspark.log", "星火X2.5治疗版(模板修复) 113t/s 听话小兵"),
-    "8086 · gemma-4-e4b":     ("http://127.0.0.1:8086", r"D:\llama\server-gemma4.err.log", "多模态轻量"),
+    "8081 · Strata Flash-Next": ("http://127.0.0.1:8081", r"E:\strata-src\strata-iq3_s.log", "Strata", "42 t/s @262K"),
+    "8082 · qwen3.8-27b":     ("http://127.0.0.1:8082", r"D:\llama\server-qwen38-27b.err.log", "ik_llama+DFlash2", "~12 t/s"),
+    "8083 · Sharp-Spark-4B":   ("http://127.0.0.1:8083", r"D:\llama\server-sharpspark.log", "llama.cpp(无草稿)", "64-90 t/s @61K"),
+    "8086 · gemma-4-e4b":     ("http://127.0.0.1:8086", r"D:\llama\server-gemma4.err.log", "llama.cpp", "~70 t/s"),
 }
 ENDPOINT   = PORTS["8081 · Strata Flash-Next"][0]
 SERVER_LOG = PORTS["8081 · Strata Flash-Next"][1]
@@ -571,7 +571,8 @@ def collect():
                     mid = ", ".join(dict.fromkeys(ids)) if ids else ""
             except Exception:
                 pass
-        return {"name": name, "alive": ok, "model": mid, "role": role}
+        return {"name": name, "alive": ok, "model": mid, "engine": role[0] if isinstance(role, tuple) else role,
+                    "tps": role[1] if isinstance(role, tuple) else ""}
 
     # 离线端口缓存：死端口连接被延迟拒绝（Windows ~2s），每轮都探会把 collect 拖到 4s。
     # 活端口每轮照探；仅【连续 2 次失败】才缓存为离线 60s（单次超时多是瞬时抖动，
@@ -582,7 +583,7 @@ def collect():
         name, (url, log, role) = item
         last = _port_cache.get(name)
         if last is not None and last[0] is False and now - last[1] < 60:
-            return {"name": name, "alive": False, "model": "", "role": role, "_cached": True}
+            return {"name": name, "alive": False, "model": "", "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "_cached": True}
         r = probe_one(item)
         if r["alive"]:
             _port_cache[name] = (True, now)
@@ -601,7 +602,7 @@ def collect():
             for r in ex.map(probe_cached, PORTS.items()):
                 ports_stat.append(r)
     except Exception:
-        ports_stat = [{"name": n, "alive": False, "model": "", "role": v[2]} for n, v in PORTS.items()]
+        ports_stat = [{"name": n, "alive": False, "model": "", "engine": v[2], "tps": v[3]} for n, v in PORTS.items()]
     d["ports_stat"] = ports_stat
     # 当前端点健康 = 普查结果里该端口那一行（避免再单独探一次 health，重复耗时 ~1s）
     cur_alive = next((p["alive"] for p in ports_stat if PORTS.get(p["name"], (None,))[0] == ENDPOINT), None)
@@ -773,8 +774,8 @@ class Win(QMainWindow):
         # 监控目标列表（仿 model-gateway：端口+模型+状态，点击切换；在线排最上）
         tgt, tv = self._card()
         cap = QLabel("监控目标（点击切换，在线优先排序）"); cap.setProperty("class", "cap"); tv.addWidget(cap)
-        self.tbl_ports = QTableWidget(0, 4)
-        self.tbl_ports.setHorizontalHeaderLabels(["端口", "属性", "模型", "状态"])
+        self.tbl_ports = QTableWidget(0, 5)
+        self.tbl_ports.setHorizontalHeaderLabels(["端口", "引擎", "理论速度", "模型", "状态"])
         self.tbl_ports.verticalHeader().setVisible(False)
         self.tbl_ports.verticalHeader().setDefaultSectionSize(22)
         self.tbl_ports.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1262,11 +1263,12 @@ class Win(QMainWindow):
             port_short = p["name"].split(" · ")[0]
             it0 = QTableWidgetItem(port_short)
             it0.setData(Qt.UserRole, p["name"])
-            it1 = QTableWidgetItem(p.get("role") or "-")
+            it1 = QTableWidgetItem(p.get("engine") or "-")
+            it1b = QTableWidgetItem(p.get("tps") or "-")
             it2 = QTableWidgetItem(p["model"] or "-")
             it3 = QTableWidgetItem("● 在线" if p["alive"] else "○ 离线")
             it3.setForeground(Qt.green if p["alive"] else Qt.gray)
-            for j, it in enumerate((it0, it1, it2, it3)):
+            for j, it in enumerate((it0, it1, it1b, it2, it3)):
                 self.tbl_ports.setItem(i, j, it)
         cur = self._cur_port_row()
         if cur >= 0:
