@@ -965,7 +965,7 @@ class Win(QMainWindow):
 
     def on_port_changed(self, text):
         global ENDPOINT, SERVER_LOG
-        ENDPOINT, SERVER_LOG, _role = PORTS[text]
+        ENDPOINT, SERVER_LOG = PORTS[text][0], PORTS[text][1]
         # 保留旧数据直到下轮 collect() 返回新端口数据（清空会导致 UI 闪烁/全空）
         try:
             self.txt_live.setPlainText("")
