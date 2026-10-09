@@ -1142,6 +1142,37 @@ class Win(QMainWindow):
     def _reset_down_streak(self):
         self._down_streak = 0
 
+    def _render_sys(self, d):
+        """CPU/内存卡片: 全机状态与选中端口无关, Strata/llama.cpp 两路共用"""
+        # CPU: 死区+直写(无过渡, 波动大); 内存: 死区+双向平滑
+        def _db(cur, new, band=3):
+            return cur if abs(new - cur) <= band else new
+        # CPU: 数据层后台线程已采好(任务管理器同源), UI 只读零阻塞
+        util_pct, ghz = d.get("tm_cpu") or (None, None)
+        if util_pct is not None:
+            cpu_new = _db(getattr(self, "_anim_cpu", 0), util_pct)
+            if cpu_new != getattr(self, "_anim_cpu", None) or ghz != getattr(self, "_cpu_ghz", None):
+                self._anim_cpu = cpu_new
+                self._cpu_ghz = ghz
+                set_val(self.bar_cb, cpu_new)
+                set_fmt(self.bar_cb, f"CPU {cpu_new}%  {ghz}GHz")
+        # 内存: 已用/总量
+        import psutil as _ps
+        vm = _ps.virtual_memory()
+        ram_pct_new = int(vm.percent)
+        ram_txt_new = f"{vm.used/2**30:.0f}G / {vm.total/2**30:.0f}G"
+        # 死区: 内存百分比天然每秒漂 ±1%（缓存 churn），不定死区会让平滑器每秒追一次
+        # 目标 -> 内存条常驻"每秒刷新动画"（2026-10-10 用户报障）。波动 <2% 且文本相同才跳过。
+        _old_pct = getattr(self, "_anim_ram_pct", None)
+        if (_old_pct is not None and ram_txt_new == getattr(self, "_ram_txt", None)
+                and abs(ram_pct_new - _old_pct) < 2):
+            pass
+        elif ram_pct_new != _old_pct or ram_txt_new != getattr(self, "_ram_txt", None):
+            self._anim_ram_pct = ram_pct_new
+            self._ram_txt = ram_txt_new
+            self._anim_ram = ram_pct_new              # 动画目标
+            set_fmt(self.bar_ph, f"{ram_txt_new}")    # 直接显示 已用/总量
+
     def _render_strata(self, d):
         """Strata 专属渲染: 变化才写, 与 llama.cpp 路径完全互斥(公共段已 return)"""
         sm = d.get("strata_metrics") or {}
@@ -1175,34 +1206,7 @@ class Win(QMainWindow):
         pct_s = min(100, 100 * used_s // max(ctx_s, 1))
         self._anim_targets["ctx"] = pct_s
         set_txt(self.ctx_lab, f"上下文  {fmt_k(used_s)} / {fmt_k(ctx_s)}   ({pct_s}%)")
-        # CPU: 死区+直写(无过渡, 波动大); 内存: 死区+双向平滑
-        def _db(cur, new, band=3):
-            return cur if abs(new - cur) <= band else new
-        # CPU: 数据层后台线程已采好(任务管理器同源), UI 只读零阻塞
-        util_pct, ghz = d.get("tm_cpu") or (None, None)
-        if util_pct is not None:
-            cpu_new = _db(getattr(self, "_anim_cpu", 0), util_pct)
-            if cpu_new != getattr(self, "_anim_cpu", None) or ghz != getattr(self, "_cpu_ghz", None):
-                self._anim_cpu = cpu_new
-                self._cpu_ghz = ghz
-                set_val(self.bar_cb, cpu_new)
-                set_fmt(self.bar_cb, f"CPU {cpu_new}%  {ghz}GHz")
-        # 内存: 已用/总量
-        import psutil as _ps
-        vm = _ps.virtual_memory()
-        ram_pct_new = int(vm.percent)
-        ram_txt_new = f"{vm.used/2**30:.0f}G / {vm.total/2**30:.0f}G"
-        # 死区: 内存百分比天然每秒漂 ±1%（缓存 churn），不定死区会让平滑器每秒追一次
-        # 目标 -> 内存条常驻"每秒刷新动画"（2026-10-10 用户报障）。波动 <2% 且文本相同才跳过。
-        _old_pct = getattr(self, "_anim_ram_pct", None)
-        if (_old_pct is not None and ram_txt_new == getattr(self, "_ram_txt", None)
-                and abs(ram_pct_new - _old_pct) < 2):
-            pass
-        elif ram_pct_new != _old_pct or ram_txt_new != getattr(self, "_ram_txt", None):
-            self._anim_ram_pct = ram_pct_new
-            self._ram_txt = ram_txt_new
-            self._anim_ram = ram_pct_new              # 动画目标
-            set_fmt(self.bar_ph, f"{ram_txt_new}")    # 直接显示 已用/总量
+        self._render_sys(d)  # CPU/内存全机状态, 移公共段(2026-10-10 切llama端口失养修复)
         set_txt(self.v_spd, f"{r0.get('decode_tok_s') or 0:.0f}")
         do_, da_ = r0.get("drafts_offered"), r0.get("drafts_accepted")
         set_txt(self.v_dft, f"{da_/do_:.2f}" if do_ and da_ is not None else "—")
@@ -1334,17 +1338,16 @@ class Win(QMainWindow):
             else:
                 lab.setText("GPU 显存 · —"); val.setText("—"); bar.setValue(0)
 
-        # 顶部瓷砖同步 + 上下文条(llama.cpp/SGLang 路径; Strata 已提前 return)
-        set_val(self.bar_cb, self.bar_ctx.value())
-        set_val(self.bar_ph, self.bar_phase.value())
+        # 上下文条(llama.cpp/SGLang 路径; Strata 已提前 return)
+        # 2026-10-10 修复: 删旧版"顶部瓷砖同步"——bar_ph 已是内存卡, 被硬写成 phase 值(空闲=0)
+        # 后动画器又拉回内存目标 -> 每秒"从零刷新"拉锯动画
         if sg:
             pool_pct = 100 * used // max(ctx, 1)
-            set_val(self.bar_ctx, pool_pct)
+            self._anim_targets["ctx"] = pool_pct
             set_txt(self.ctx_lab, f"KV 池  {fmt_k(used)} / {fmt_k(ctx)}   ({pool_pct}%)  活跃请求 {sgst.get('running') or 0}")
         else:
-            set_val(self.bar_ctx, pct)
+            self._anim_targets["ctx"] = pct
             set_txt(self.ctx_lab, f"上下文  {fmt_k(used)} / {fmt_k(ctx)}   ({pct}%)")
-        set_val(self.bar_cb, self.bar_ctx.value())
         set_fmt(self.bar_cb, fmt_k(used) + " / " + fmt_k(ctx) + "  %p%")
 
         # 阶段判定（源码级）：/slots is_processing + /metrics gauge
@@ -1363,36 +1366,36 @@ class Win(QMainWindow):
         else:
             phase = "idle"
         if phase == "prefill":
-            self.bar_phase.setValue(60)
+            self._anim_targets["phase"] = 60
             self.phase_lab.setText(f"预填充中  prompt {mt_p:.0f} tok/s（官方 metrics gauge）")
             self.lb_phase_inline.setText("预填中")
         elif phase == "decode":
-            self.bar_phase.setValue(100)
+            self._anim_targets["phase"] = 100
             self.phase_lab.setText(f"解码中  {mt_d:.0f} tok/s（官方 metrics gauge）")
             self.lb_phase_inline.setText("解码中")
         else:
-            self.bar_phase.setValue(0)
+            self._anim_targets["phase"] = 0
             self.phase_lab.setText("阶段  空闲")
             self.lb_phase_inline.setText("")
         if False:
-            self.bar_phase.setValue(100)
+            self._anim_targets["phase"] = 100
             self.phase_lab.setText(f"解码生成  {fmt_k(lg[0])} tok @ {lg[2]:.0f} tok/s（均速 {lg[1]:.0f}）")
             self.lb_phase_inline.setText(f"解码中 {fmt_k(lg[0])} tok @ {lg[2]:.0f} t/s")
         elif proc:
             ptot = slots0.get("n_prompt_tokens", 0)
             pdone = slots0.get("n_prompt_tokens_processed", 0)
             pp = 100 * pdone // max(ptot, 1)
-            self.bar_phase.setValue(pp)
+            self._anim_targets["phase"] = pp
             self.phase_lab.setText(f"预填充  {pp}%（{fmt_k(pdone)} / {fmt_k(ptot)} tok）")
             self.lb_phase_inline.setText(f"预填中 {pp}%")
         elif live_file_fresh():
             # 请求间隙：is_processing 瞬时 False 但 live 仍在输出 → 不许装空闲
             sp = last_speed()
-            self.bar_phase.setValue(100)
+            self._anim_targets["phase"] = 100
             self.phase_lab.setText(f"连续请求中 @ {sp:.0f} t/s" if sp else "连续请求中")
             self.lb_phase_inline.setText("连续请求中")
         else:
-            self.bar_phase.setValue(0)
+            self._anim_targets["phase"] = 0
             self.phase_lab.setText("阶段  空闲")
             self.lb_phase_inline.setText("")
 
