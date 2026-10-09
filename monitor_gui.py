@@ -554,7 +554,7 @@ def collect():
     import concurrent.futures as _cf
 
     def probe_one(item):
-        name, (url, log, role) = item
+        name, meta = item; url, log = meta[0], meta[1]; role = (meta[2], meta[3]) if len(meta) == 4 else meta[2]
         ok, mid = False, ""
         try:
             # 超时须 ≥ SGLang /health 的固有延迟（实测 ~1.0s），否则活端口被误判离线
@@ -580,7 +580,7 @@ def collect():
     now = time.time()
 
     def probe_cached(item):
-        name, (url, log, role) = item
+        pass
         last = _port_cache.get(name)
         if last is not None and last[0] is False and now - last[1] < 60:
             return {"name": name, "alive": False, "model": "", "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "_cached": True}
