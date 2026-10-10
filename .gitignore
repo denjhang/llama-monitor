@@ -18,3 +18,5 @@ LICENSE-LLVM-OpenMP
 tee-usage.jsonl
 live-gen.txt
 server-mode.txt
+build/
+*.spec

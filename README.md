@@ -3,6 +3,17 @@
 > 双 RTX 3080 20G · Qwen3.8-27B 治疗版（EfficientThink Q3-LynnStyle）· Windows 原生
 > 维护记录始于 2026-09-22，本文档为唯一权威操作手册
 
+
+## 🚀 2026-10-11 发布版（v1.0）
+
+**独立 exe 发布**：`pyinstaller --noconsole --onefile --icon llama-monitor.ico --name llama-monitor monitor_gui.py`
+产物 `dist/llama-monitor.exe`（48M，双击即用，可固定任务栏——exe 有独立应用身份）。
+
+- 监控 GUI = 唯一需要看见的窗口；网关/模型一律 pythonw 后台常驻（**严禁 python.exe 弹控制台——窗口被关=进程陪葬**）
+- 起停套件：start-monitor.bat / restart-gateway.bat / start-strata.bat / stop-strata.bat
+- 当前架构：8080 网关（model-tee，按 model 名路由）→ 8081 Strata Flash-Next 42t/s / 8083 spark-therapy-4b（治疗版+--reasoning-budget 2048 保险丝）；8082 备用
+- 监控数据源：Strata=GET /metrics；llama.cpp=/slots+/metrics；live 实时输出=live-8080-<port>.txt 专文件（专文件存在即无条件优先，勿比 mtime）
+
 ## 一、架构总览
 
 ```
