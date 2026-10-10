@@ -14,6 +14,14 @@
 - 当前架构：8080 网关（model-tee，按 model 名路由）→ 8081 Strata Flash-Next 42t/s / 8083 spark-therapy-4b（治疗版+--reasoning-budget 2048 保险丝）；8082 备用
 - 监控数据源：Strata=GET /metrics；llama.cpp=/slots+/metrics；live 实时输出=live-8080-<port>.txt 专文件（专文件存在即无条件优先，勿比 mtime）
 
+
+## 📦 版本历史（Release 各版并存，展示进化）
+
+| 版本 | 包 | 里程碑 |
+|---|---|---|
+| [v1.0](https://github.com/denjhang/llama-monitor/releases/tag/v1.0) | llama-monitor-v1.0.exe | 首个独立 exe：可固定任务栏、网关多模型路由、live 分文件防混流 |
+| [v1.1](https://github.com/denjhang/llama-monitor/releases/tag/v1.1) | llama-monitor-v1.1.exe | 配置化：⚙ 设置对话框增删改端点、配置文件热重载、最近请求导出 CSV、后端类型化（strata/llama.cpp/ik/sglang） |
+
 ## ⚙ 配置文件（2026-10-11 起）
 
 监控端点不再写死：`monitor-config.json`（exe 同目录，首次运行自动生成模板），**保存后 GUI 自动热重载**，无需重启。
