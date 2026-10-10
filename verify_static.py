@@ -24,13 +24,15 @@ lines = open(r'E:\strata-src\strata-iq3_s.log', encoding='utf-8', errors='replac
 hits = [l for l in lines if re.search(pat, l)]
 check('STRATA_RE 命中真实日志 >=1 条', len(hits) >= 1)
 
-# 3. 互斥结构: Strata 块内含表格渲染 + return, 且 return 在 llama.cpp 阶段判定之前
-strata_i = src.index('# ---- Strata 引擎分支')
-phase_i = src.index('# 阶段判定（源码级）')
-block = src[strata_i:phase_i]
-check('Strata 块内含表格渲染', 'self.table.setRowCount' in block)
-check('Strata 块以 return 结束(互斥)', block.rstrip().endswith('return'))
-check('llama.cpp 段在 Strata 块之后', strata_i < phase_i)
+# 3. 互斥结构: refresh 里 is_strata -> _render_strata(d); return（2026-10-11 对齐方法化结构）
+call_i = src.index('self._render_strata(d)')
+ret_i = src.index('return', call_i)
+check('Strata 分支先渲染后互斥 return', 0 < call_i < ret_i and ret_i - call_i < 40)
+check('_render_strata 方法存在且含渲染', 'def _render_strata(self, d):' in src and 'set_txt' in src[src.index('def _render_strata'):src.index('def _render_strata')+4000])
+# 配置驱动结构（2026-10-11 新增）
+check('配置驱动: MONITOR_CONFIG 存在', 'MONITOR_CONFIG' in src and 'load_monitor_config' in src)
+check('类型化端点判断', 'def endpoint_type(' in src and 'endpoint_type() == "strata"' in src)
+check('配置热重载挂载', 'hot_reload_config' in src and 'hot_reload_qss' in src)
 
 # 4. headless 数据层: 用 exec 环境跑 recent_requests 核心(照抄逻辑)
 ns = {'re': re}

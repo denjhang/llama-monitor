@@ -11,26 +11,96 @@ import json, os, re, subprocess, sys, threading, time, datetime, urllib.request
 
 from PySide6.QtCore import Qt, QTimer, QRect, QSize
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QDialog, QDialogButtonBox,
+                               QComboBox, QFileDialog, QGridLayout, QLineEdit,
                                QHBoxLayout, QLabel, QProgressBar, QTableWidget,
                                QTableWidgetItem, QHeaderView, QFrame, QTextEdit,
                                QPushButton,
                                QRubberBand, QCheckBox, QScrollArea)
 
-# 可监控端口表（Strata 42t/s 主力 + llama.cpp 备用）
-PORTS = {
-    "8081 · Strata Flash-Next": ("http://127.0.0.1:8081", r"E:\strata-src\strata-iq3_s.log", "Strata", "42 t/s @262K"),
-    "8082 · qwen3.8-27b":     ("http://127.0.0.1:8082", r"D:\llama\server-qwen38-27b.err.log", "ik_llama+DFlash2", "~12 t/s"),
-    "8083 · Sharp-Spark-4B":   ("http://127.0.0.1:8083", r"D:\llama\server-sparktherapy.log", "llama.cpp(无草稿)", "64-90 t/s @61K"),
-    "8086 · gemma-4-e4b":     ("http://127.0.0.1:8086", r"D:\llama\server-gemma4.err.log", "llama.cpp", "~70 t/s"),
+# ================== 配置驱动（2026-10-11） ==================
+# 一切端点/路径由 monitor-config.json 决定（exe 同目录；不存在则自动写出模板）。
+# 支持的后端 type：strata / llama.cpp / ik / sglang
+# 配置文件保存后 GUI 自动热重载（改端口表/日志路径即时生效，无需重启）。
+import sys as _sys
+_BASE_DIR = os.path.dirname(os.path.abspath(getattr(_sys, 'frozen', False) and _sys.executable or _sys.argv[0]))
+MONITOR_CONFIG = os.path.join(_BASE_DIR, 'monitor-config.json')
+CFG_FILE = r"D:\llama\monitor-gui-cfg.json"  # 窗口几何持久化（与端点配置无关）
+
+DEFAULT_CONFIG = {
+    "default_port": "8081 · Strata Flash-Next",
+    "live_dir": "D:/llama",
+    "events_log": "D:/llama/watchdog-events.log",
+    "mode_file": "D:/llama/server-mode.txt",
+    "exe": "D:/llama/llama-server.exe",
+    "ports": [
+        {"name": "8081 · Strata Flash-Next", "url": "http://127.0.0.1:8081",
+         "log": "E:/strata-src/strata-iq3_s.log", "engine": "Strata",
+         "tps": "42 t/s @262K", "type": "strata"},
+        {"name": "8082 · qwen3.8-27b", "url": "http://127.0.0.1:8082",
+         "log": "D:/llama/server-qwen38-27b.err.log", "engine": "ik_llama+DFlash2",
+         "tps": "~12 t/s", "type": "ik"},
+        {"name": "8083 · spark-therapy-4b", "url": "http://127.0.0.1:8083",
+         "log": "D:/llama/boot-spark-v3f.err.log", "engine": "llama.cpp(无草稿)",
+         "tps": "64-90 t/s @61K", "type": "llama.cpp"},
+        {"name": "8086 · gemma-4-e4b", "url": "http://127.0.0.1:8086",
+         "log": "D:/llama/server-gemma4.err.log", "engine": "llama.cpp",
+         "tps": "~70 t/s", "type": "llama.cpp"},
+    ],
 }
-ENDPOINT   = PORTS["8081 · Strata Flash-Next"][0]
-SERVER_LOG = PORTS["8081 · Strata Flash-Next"][1]
-LIVE_FILE  = r"D:\llama\live-gen.txt"
-EVENTS_LOG = r"D:\llama\watchdog-events.log"
-MODE_FILE  = r"D:\llama\server-mode.txt"
-EXE        = r"D:\llama\llama-server.exe"
-CFG_FILE   = r"D:\llama\monitor-gui-cfg.json"
+
+def load_monitor_config(quiet=True):
+    """读配置（缺失/损坏回退默认并写出模板）。返回 (cfg, ok)。"""
+    cfg = DEFAULT_CONFIG
+    ok = True
+    try:
+        cfg = json.load(open(MONITOR_CONFIG, encoding='utf-8'))
+    except FileNotFoundError:
+        try:
+            with open(MONITOR_CONFIG, 'w', encoding='utf-8') as f:
+                json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+    except Exception as e:
+        ok = False
+        if not quiet:
+            raise
+        print('config broken, using defaults:', e)
+    return cfg, ok
+
+def _ports_from_cfg(cfg):
+    out = {}
+    for p in cfg.get('ports', DEFAULT_CONFIG['ports']):
+        try:
+            out[p['name']] = (p['url'], p.get('log', ''), p.get('engine', ''),
+                              p.get('tps', ''), p.get('type', 'llama.cpp'))
+        except KeyError:
+            continue
+    return out or _ports_from_cfg(DEFAULT_CONFIG)
+
+_CFG, _ = load_monitor_config()
+PORTS = _ports_from_cfg(_CFG)
+LIVE_DIR    = _CFG.get('live_dir', 'D:/llama')
+EVENTS_LOG  = _CFG.get('events_log', DEFAULT_CONFIG['events_log'])
+MODE_FILE   = _CFG.get('mode_file', DEFAULT_CONFIG['mode_file'])
+EXE         = _CFG.get('exe', DEFAULT_CONFIG['exe'])
+DEFAULT_NAME = _CFG.get('default_port')
+if DEFAULT_NAME not in PORTS:
+    DEFAULT_NAME = next(iter(PORTS))
+ENDPOINT   = PORTS[DEFAULT_NAME][0]
+SERVER_LOG = PORTS[DEFAULT_NAME][1]
+LIVE_FILE  = os.path.join(LIVE_DIR, 'live-gen.txt')
+
+# 端口 -> 后端类型表（供 is_strata/is_sglang/进程识别使用，替代硬编码端口号）
+def _type_map():
+    return {v[0].rsplit(':', 1)[-1]: v[4] for v in PORTS.values()}
+_TYPES = _type_map()
+
+def endpoint_type(port=None, default='llama.cpp'):
+    """当前（或指定）端口的后端类型：strata / llama.cpp / ik / sglang"""
+    p = port or ENDPOINT.rsplit(':', 1)[-1]
+    return _TYPES.get(p, default)
+# ===========================================================
 
 QSS_FILE = r"D:\llama-monitor\monitor-gui.qss"
 
@@ -90,9 +160,8 @@ _port_fail = {}
 _PREFILL_STATE = {"total": 0}
 
 def is_strata(model_info=None):
-    """8081 = Strata 引擎（无 /slots、llama.cpp 版 /metrics；数据走自身日志与 /v1/models）"""
-    port = ENDPOINT.rsplit(":", 1)[-1]
-    if port == "8081":
+    """type=strata 的端口 = Strata 引擎（无 /slots、llama.cpp 版 /metrics；数据走自身日志与 /v1/models）"""
+    if endpoint_type() == "strata":
         return True
     m = model_info if model_info is not None else get_json("/v1/models")
     try:
@@ -104,7 +173,7 @@ def is_sglang(model_info=None):
     """8092 tee 直连 SGLang；8080 网关在其后端是 SGLang 时也按 SGLang 解析
     （网关 /health 同样返回 200 空 body、无 /slots，走 llama.cpp 路径必误判掉线）"""
     port = ENDPOINT.rsplit(":", 1)[-1]
-    if port in SGLANG_PORTS:
+    if endpoint_type() == "sglang" or port in SGLANG_PORTS:
         return True
     if port == "8080":
         m = model_info if model_info is not None else get_json("/v1/models")
@@ -480,8 +549,8 @@ def uptime():
     port = ENDPOINT.rsplit(":", 1)[-1]
     try:
         import psutil
-        # 8081 = Strata 引擎; 其余 = 占住该端口的 llama-server
-        if port == "8081":
+        # type=strata 的端口看 strata.exe；其余 = 占住该端口的 llama-server
+        if endpoint_type(port) == "strata":
             for pr in psutil.process_iter(["name", "create_time"]):
                 if (pr.info["name"] or "").lower() == "strata.exe":
                     return time.time() - pr.info["create_time"]
@@ -743,6 +812,85 @@ def vram_row(title):
     v.addLayout(hr); v.addWidget(bar)
     return w, lab, val, bar
 
+
+class SettingsDialog(QDialog):
+    """端点设置对话框：增删改监控目标 + 路径配置，保存即写 monitor-config.json 并热生效。"""
+    TYPES = ('strata', 'llama.cpp', 'ik', 'sglang')
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("监控设置")
+        self.resize(760, 480)
+        cfg, _ = load_monitor_config()
+        self._cfg = cfg
+        lay = QVBoxLayout(self)
+        tip = QLabel("双击单元格直接编辑；type 决定渲染路径（strata / llama.cpp / ik / sglang）。保存后立即生效。")
+        tip.setProperty("class", "dim"); tip.setWordWrap(True)
+        lay.addWidget(tip)
+        self.tbl = QTableWidget(0, 6)
+        self.tbl.setHorizontalHeaderLabels(["显示名", "地址", "引擎日志", "引擎", "速度(显示用)", "类型"])
+        self.tbl.verticalHeader().setVisible(False)
+        hh = self.tbl.horizontalHeader(); hh.setSectionResizeMode(QHeaderView.Stretch)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        lay.addWidget(self.tbl)
+        for p in cfg.get("ports", []):
+            self._add_row(p)
+        brow = QHBoxLayout()
+        for txt, fn in (("＋ 添加端点", self._add), ("－ 删除选中", self._del)):
+            b = QPushButton(txt); b.clicked.connect(fn); brow.addWidget(b)
+        brow.addStretch(1)
+        lay.addLayout(brow)
+        grid = QGridLayout()
+        self.ed_live = QLineEdit(cfg.get("live_dir", "D:/llama"))
+        self.ed_events = QLineEdit(cfg.get("events_log", ""))
+        self.ed_exe = QLineEdit(cfg.get("exe", ""))
+        for i, (lab, ed) in enumerate((("live 目录", self.ed_live), ("事件日志", self.ed_events), ("引擎 exe", self.ed_exe))):
+            grid.addWidget(QLabel(lab), i, 0); grid.addWidget(ed, i, 1)
+        lay.addLayout(grid)
+        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _add_row(self, p):
+        r = self.tbl.rowCount(); self.tbl.insertRow(r)
+        self.tbl.setItem(r, 0, QTableWidgetItem(str(p.get("name", ""))))
+        self.tbl.setItem(r, 1, QTableWidgetItem(str(p.get("url", ""))))
+        self.tbl.setItem(r, 2, QTableWidgetItem(str(p.get("log", ""))))
+        self.tbl.setItem(r, 3, QTableWidgetItem(str(p.get("engine", ""))))
+        self.tbl.setItem(r, 4, QTableWidgetItem(str(p.get("tps", ""))))
+        cb = QComboBox(); cb.addItems(self.TYPES)
+        cb.setCurrentText(p.get("type", "llama.cpp"))
+        self.tbl.setCellWidget(r, 5, cb)
+
+    def _add(self):
+        self._add_row({"name": "新端点", "url": "http://127.0.0.1:8099",
+                       "log": "", "engine": "", "tps": "", "type": "llama.cpp"})
+
+    def _del(self):
+        r = self.tbl.currentRow()
+        if r >= 0:
+            self.tbl.removeRow(r)
+
+    def result_config(self):
+        cfg = dict(self._cfg)
+        ports = []
+        for r in range(self.tbl.rowCount()):
+            def cell(c, _r=r):
+                it = self.tbl.item(_r, c)
+                return it.text().strip() if it else ""
+            cb = self.tbl.cellWidget(r, 5)
+            if not cell(0) or not cell(1):
+                continue
+            ports.append({"name": cell(0), "url": cell(1), "log": cell(2),
+                          "engine": cell(3), "tps": cell(4),
+                          "type": cb.currentText() if cb else "llama.cpp"})
+        cfg["ports"] = ports
+        cfg["live_dir"] = self.ed_live.text().strip() or cfg.get("live_dir")
+        cfg["events_log"] = self.ed_events.text().strip() or cfg.get("events_log")
+        cfg["exe"] = self.ed_exe.text().strip() or cfg.get("exe")
+        if cfg.get("default_port") not in [p["name"] for p in ports]:
+            cfg["default_port"] = ports[0]["name"] if ports else cfg.get("default_port")
+        return cfg
+
 class Win(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -780,7 +928,12 @@ class Win(QMainWindow):
 
         # 监控目标列表（仿 model-gateway：端口+模型+状态，点击切换；在线排最上）
         tgt, tv = self._card()
-        cap = QLabel("监控目标（点击切换，在线优先排序）"); cap.setProperty("class", "cap"); tv.addWidget(cap)
+        caprow = QHBoxLayout()
+        cap = QLabel("监控目标（点击切换，在线优先排序）"); cap.setProperty("class", "cap")
+        btn_cfg = QPushButton("⚙ 设置"); btn_cfg.setToolTip("增删改监控端点，保存即生效")
+        btn_cfg.clicked.connect(self.open_settings)
+        caprow.addWidget(cap); caprow.addStretch(1); caprow.addWidget(btn_cfg)
+        tv.addLayout(caprow)
         self.tbl_ports = QTableWidget(0, 5)
         self.tbl_ports.setHorizontalHeaderLabels(["端口", "引擎", "理论速度", "模型", "状态"])
         self.tbl_ports.verticalHeader().setVisible(False)
@@ -791,7 +944,7 @@ class Win(QMainWindow):
         ph.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         ph.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         # 固定三行高：在线的排最上所以前三行就是重点，其余靠滚动条
-        self.tbl_ports.setFixedHeight(3 * 22 + 32)
+        self.tbl_ports.setFixedHeight(min(6, len(PORTS)) * 22 + 32)
         self.tbl_ports.cellClicked.connect(self._pick_port)
         tv.addWidget(self.tbl_ports)
         col.addWidget(tgt)
@@ -849,7 +1002,12 @@ class Win(QMainWindow):
 
         # 请求表
         tbl, tbv = self._card()
-        cap = QLabel("最近请求"); cap.setProperty("class", "cap"); tbv.addWidget(cap)
+        caprow2 = QHBoxLayout()
+        cap2 = QLabel("最近请求"); cap2.setProperty("class", "cap")
+        btn_csv = QPushButton("导出 CSV"); btn_csv.setToolTip("当前最近请求表导出为 CSV（Excel 可直接打开）")
+        btn_csv.clicked.connect(self.export_requests_csv)
+        caprow2.addWidget(cap2); caprow2.addStretch(1); caprow2.addWidget(btn_csv)
+        tbv.addLayout(caprow2)
         self.table = QTableWidget(0, 8)
         self.table.setAlternatingRowColors(True)
         self.table.setHorizontalHeaderLabels(["task", "输入tok", "生成tok", "tok/s", "draft", "会话总量", "耗时", "状态"])
@@ -970,6 +1128,59 @@ class Win(QMainWindow):
                 return r
         return -1
 
+    def open_settings(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            cfg = dlg.result_config()
+            try:
+                with open(MONITOR_CONFIG, 'w', encoding='utf-8') as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+            except OSError as e:
+                self._toast(f"⚠ 配置写入失败: {e}")
+                return
+            self._cfg_mtime = os.path.getmtime(MONITOR_CONFIG)
+            self.apply_config(cfg)
+            self._toast("⚙ 配置已保存并生效")
+
+    def apply_config(self, cfg):
+        """把配置对象应用到全局并刷新端口表（设置对话框与文件热重载共用）。"""
+        global PORTS, ENDPOINT, SERVER_LOG, LIVE_DIR, EVENTS_LOG, MODE_FILE, EXE
+        old_endpoint = ENDPOINT
+        PORTS = _ports_from_cfg(cfg)
+        _TYPES.clear(); _TYPES.update(_type_map())
+        LIVE_DIR = cfg.get('live_dir', LIVE_DIR)
+        EVENTS_LOG = cfg.get('events_log', EVENTS_LOG)
+        MODE_FILE = cfg.get('mode_file', MODE_FILE)
+        EXE = cfg.get('exe', EXE)
+        if old_endpoint not in [v[0] for v in PORTS.values()]:
+            name = cfg.get('default_port')
+            if name not in PORTS:
+                name = next(iter(PORTS))
+            ENDPOINT, SERVER_LOG = PORTS[name][0], PORTS[name][1]
+        self.tbl_ports.setFixedHeight(min(6, len(PORTS)) * 22 + 32)
+
+    def export_requests_csv(self):
+        """最近请求表导出 CSV（utf-8-sig 保证 Excel 中文不乱码）"""
+        port = ENDPOINT.rsplit(":", 1)[-1]
+        ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+        default = os.path.join(LIVE_DIR, f'requests-{port}-{ts}.csv')
+        path, _ = QFileDialog.getSaveFileName(self, "导出最近请求", default, "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+                cols = [self.table.horizontalHeaderItem(i).text() for i in range(self.table.columnCount())]
+                f.write(",".join('"%s"' % c.replace('"', '""') for c in cols) + "\r\n")
+                for r in range(self.table.rowCount()):
+                    vals = []
+                    for c in range(self.table.columnCount()):
+                        it = self.table.item(r, c)
+                        vals.append('"%s"' % (it.text().replace('"', '""') if it else ""))
+                    f.write(",".join(vals) + "\r\n")
+            self._toast(f"CSV 已导出: {os.path.basename(path)}")
+        except OSError as e:
+            self._toast(f"⚠ 导出失败: {e}")
+
     def on_port_changed(self, text):
         global ENDPOINT, SERVER_LOG
         ENDPOINT, SERVER_LOG = PORTS[text][0], PORTS[text][1]
@@ -993,8 +1204,10 @@ class Win(QMainWindow):
         self._save_timer.timeout.connect(self.save_geometry)
         # QSS 热重载：监听样式文件，改动即时应用，窗口不关不动
         self._qss_mtime = 0
+        self._cfg_mtime = 0
         tq = QTimer(self, interval=1000)
         tq.timeout.connect(self.hot_reload_qss)
+        tq.timeout.connect(self.hot_reload_config)
         tq.start()
 
     def hot_reload_qss(self):
@@ -1005,6 +1218,22 @@ class Win(QMainWindow):
         if mt != self._qss_mtime:
             self._qss_mtime = mt
             QApplication.instance().setStyleSheet(load_qss())
+
+    def hot_reload_config(self):
+        """monitor-config.json 变更即热重载端口表（无需重启）。"""
+        try:
+            mt = os.path.getmtime(MONITOR_CONFIG)
+        except OSError:
+            return
+        if mt == self._cfg_mtime:
+            return
+        self._cfg_mtime = mt
+        cfg, ok = load_monitor_config()
+        if not ok:
+            self._toast("⚠ 配置文件 JSON 有误，保留旧配置")
+            return
+        self.apply_config(cfg)
+        self._toast("⚙ 配置已热重载")
 
     def save_geometry(self):
         try:
@@ -1069,14 +1298,14 @@ class Win(QMainWindow):
         port = ENDPOINT.rsplit(":", 1)[-1]
         # 网关按上游端口分文件（live-8080-<upstream>.txt）：点哪个端口看哪个模型的输出，
         # 多模型并行时不再混流。选中端口有专文件且比聚合文件新就用专文件。
-        per_port = rf"D:\llama\live-8080-{port}.txt"
+        per_port = os.path.join(LIVE_DIR, f"live-8080-{port}.txt")
         if port != "8080" and os.path.exists(per_port):
             return per_port
         # 同后端代理组：8080 网关与 8092 tee 都转发到 8082，实时视图应一致
         group = {"8080": ["8080", "8092"], "8092": ["8080", "8092"], "8081": ["8080"]}.get(port, [port])
         best, best_mt = None, -1
         for p in group:
-            f = rf"D:\llama\live-{p}.txt"
+            f = os.path.join(LIVE_DIR, f"live-{p}.txt")
             try:
                 mt = os.path.getmtime(f)
             except OSError:

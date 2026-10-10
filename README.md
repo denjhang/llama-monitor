@@ -14,6 +14,39 @@
 - 当前架构：8080 网关（model-tee，按 model 名路由）→ 8081 Strata Flash-Next 42t/s / 8083 spark-therapy-4b（治疗版+--reasoning-budget 2048 保险丝）；8082 备用
 - 监控数据源：Strata=GET /metrics；llama.cpp=/slots+/metrics；live 实时输出=live-8080-<port>.txt 专文件（专文件存在即无条件优先，勿比 mtime）
 
+## ⚙ 配置文件（2026-10-11 起）
+
+监控端点不再写死：`monitor-config.json`（exe 同目录，首次运行自动生成模板），**保存后 GUI 自动热重载**，无需重启。
+
+```json
+{
+  "default_port": "8081 · Strata Flash-Next",
+  "live_dir": "D:/llama",
+  "events_log": "D:/llama/watchdog-events.log",
+  "exe": "D:/llama/llama-server.exe",
+  "ports": [
+    {"name": "8081 · Strata Flash-Next", "url": "http://127.0.0.1:8081",
+     "log": "E:/strata-src/strata-iq3_s.log", "engine": "Strata",
+     "tps": "42 t/s @262K", "type": "strata"}
+  ]
+}
+```
+
+### 支持的后端 type
+
+| type | 引擎 | 数据源 | 说明 |
+|---|---|---|---|
+| `strata` | Strata（Flash-Next 专用） | `GET /metrics` 单端点 | live.state/prompt_read/requests/hardware 全包；进程识别走 strata.exe |
+| `llama.cpp` | llama-server（主线） | `/slots` + `/metrics` gauge | 阶段判定源码级；含 spark 等无草稿模型 |
+| `ik` | ik_llama.cpp | 同 llama.cpp | 兼容主线接口，含 MTP/DFlash 草稿统计 |
+| `sglang` | SGLang（WSL） | WSL 侧日志解析 | Decode/Prefill batch 行；`log` 留空走默认 WSL 路径 |
+
+字段说明：`name` 端口表显示名（任意）；`url` 探测地址；`log` 该端点引擎日志（最近请求表数据源）；`engine`/`tps` 仅显示用；`type` 决定渲染路径。网关 8080 的实时输出按上游端口分文件（`live-8080-<端口>.txt`，存 `live_dir`），点哪个端口看哪个模型的生成。
+
+### 窗口几何
+
+窗口位置/大小仍持久化在 `D:\llama\monitor-gui-cfg.json`（与端点配置互不影响）。样式 `monitor-gui.qss` 改动即时热生效。
+
 ## 一、架构总览
 
 ```
