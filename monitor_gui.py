@@ -808,9 +808,10 @@ def collect():
     return d
 
 def fmt_k(n):
-    if n is None or n == "-":
-        return "-"
-    n = int(n)
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "无"   # 占位统一"无"，禁负号
     return f"{n/1000:.1f}K" if n >= 1000 else str(n)
 
 def fmt_gb(mib):
@@ -1691,7 +1692,9 @@ class Win(QMainWindow):
         else:
             self._anim_targets["ctx"] = pct
             set_txt(self.ctx_lab, f"上下文  {fmt_k(used)} / {fmt_k(ctx)}   ({pct}%)")
-        set_fmt(self.bar_cb, fmt_k(used) + " / " + fmt_k(ctx) + "  %p%")
+        # 2026-10-12 修复: 此处曾把上下文值写进 bar_cb(CPU 卡)——v1 时代该位置是"上下文"卡的遗留;
+        # CPU 卡只由 _render_sys 写(tm_cpu 任务管理器同源数据), 上下文格式落到自己的 bar_ctx 上
+        set_fmt(self.bar_ctx, fmt_k(used) + " / " + fmt_k(ctx) + "  %p%")
 
         # 阶段判定（源码级）：/slots is_processing + /metrics gauge
         #   预填充 = 处理中且 prompt_tokens_seconds > 0
