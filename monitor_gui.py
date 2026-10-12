@@ -36,16 +36,16 @@ DEFAULT_CONFIG = {
     "ports": [
         {"name": "8081 · Strata Flash-Next", "url": "http://127.0.0.1:8081",
          "log": "E:/strata-src/strata-iq3_s.log", "engine": "Strata",
-         "tps": "42 t/s @262K", "type": "strata"},
+         "tps": "42 t/s", "ctx": "262K", "type": "strata"},
         {"name": "8082 · qwen3.8-27b", "url": "http://127.0.0.1:8082",
          "log": "D:/llama/server-qwen38-27b.err.log", "engine": "ik_llama+DFlash2",
-         "tps": "~12 t/s", "type": "ik"},
+         "tps": "12 t/s", "ctx": "", "type": "ik"},
         {"name": "8083 · spark-therapy-4b", "url": "http://127.0.0.1:8083",
          "log": "D:/llama/boot-spark-v3f.err.log", "engine": "llama.cpp(无草稿)",
-         "tps": "64-90 t/s @61K", "type": "llama.cpp"},
+         "tps": "95 t/s", "ctx": "262K", "type": "llama.cpp"},
         {"name": "8086 · gemma-4-e4b", "url": "http://127.0.0.1:8086",
          "log": "D:/llama/server-gemma4.err.log", "engine": "llama.cpp",
-         "tps": "~70 t/s", "type": "llama.cpp"},
+         "tps": "70 t/s", "ctx": "131K", "type": "llama.cpp"},
     ],
 }
 
@@ -73,7 +73,7 @@ def _ports_from_cfg(cfg):
     for p in cfg.get('ports', DEFAULT_CONFIG['ports']):
         try:
             out[p['name']] = (p['url'], p.get('log', ''), p.get('engine', ''),
-                              p.get('tps', ''), p.get('type', 'llama.cpp'))
+                              p.get('tps', ''), p.get('type', 'llama.cpp'), p.get('ctx', ''))
         except KeyError:
             continue
     return out or _ports_from_cfg(DEFAULT_CONFIG)
@@ -525,6 +525,54 @@ def vram():
             gpus.append({"i": f[0], "used": int(f[1]), "tot": int(f[2]), "util": f[3], "temp": f[4], "pw": f[5]})
     return gpus
 
+def pid_gpu_map():
+    """nvidia-smi compute-apps: pid -> [GPU index,...]（一个进程可占多卡）"""
+    try:
+        u = run_cmd(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"])
+        uuid2i = {p.split(",")[1].strip(): p.split(",")[0].strip() for p in u.strip().splitlines() if "," in p}
+        a = run_cmd(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader"])
+        m = {}
+        for l in a.strip().splitlines():
+            f = [x.strip() for x in l.split(",")]
+            if len(f) == 2 and f[1].isdigit() and f[0] in uuid2i:
+                m.setdefault(int(f[1]), set()).add(uuid2i[f[0]])
+        return m
+    except Exception:
+        return {}
+
+def port_gpu(port, pgmap=None):
+    """该端口全部监听进程占用的所有卡，如 GPU 0/1/3；查不到返回 None"""
+    try:
+        import psutil
+        pgmap = pgmap if pgmap is not None else pid_gpu_map()
+        gpus = set()
+        for c in psutil.net_connections(kind="tcp"):
+            if c.laddr and c.laddr.port == int(port) and c.status == psutil.CONN_LISTEN and c.pid:
+                gpus |= pgmap.get(c.pid, set())
+        if gpus:
+            return "GPU " + "/".join(sorted(gpus, key=int))
+    except Exception:
+        pass
+    return None
+
+def usage_ts_index(n=30):
+    """网关流水最近 n 条：{(prompt_tokens, completion_tokens): "HH:MM:SS"}，供请求表补真实调用时间"""
+    out = {}
+    try:
+        for l in open(r"D:" + chr(92) + "llama" + chr(92) + "tee-usage-8080.jsonl", encoding="utf-8", errors="replace").readlines()[-n:]:
+            try:
+                r = json.loads(l)
+                out[(r.get("prompt_tokens"), r.get("completion_tokens"))] = r.get("ts") or ""
+            except Exception:
+                pass
+    except OSError:
+        pass
+    return out
+
+def draft_label(port_type, cfg_ports=None):
+    """草稿头显示：strata=MTP、ik=DFlash2、其余无（配置 ports[].draft 可覆盖）"""
+    return {"strata": "MTP", "ik": "DFlash2"}.get(port_type, "") or "无"
+
 def death_stats():
     n_down = n_restart = 0
     last_verdict, last_time = "-", "-"
@@ -629,8 +677,31 @@ def collect():
     # 全端口普查（并发 + 离线缓存）放最前：串行时死端口各等 ~2s，5 个端口要 8s ≫ 1s 刷新
     import concurrent.futures as _cf
 
+    _pgmap = pid_gpu_map()
+
+    # 慢项（tm_cpu ~3.5s、各 HTTP 探测）与端口普查同时起跑——否则普查 2.5s + 慢池 3.5s 串接成 6s
+    def _metrics_raw():
+        try:
+            with urllib.request.urlopen(ENDPOINT + "/metrics", timeout=3) as r:
+                return r.read().decode("utf-8", "replace")
+        except Exception:
+            return ""
+    _bigpool = _cf.ThreadPoolExecutor(max_workers=10)
+    f_m = _bigpool.submit(get_json, "/v1/models")
+    f_gpus = _bigpool.submit(vram)
+    f_cpu = _bigpool.submit(tm_cpu)
+    f_run = _bigpool.submit(server_running)
+    f_deaths = _bigpool.submit(death_stats)
+    f_up = _bigpool.submit(uptime)
+    f_reqs = _bigpool.submit(recent_requests, 50)
+    f_err = _bigpool.submit(last_error)
+    f_slots = _bigpool.submit(get_json, "/slots")
+    f_health = _bigpool.submit(get_json, "/health")
+    f_mt = _bigpool.submit(_metrics_raw)
+
     def probe_one(item):
-        name, meta = item; url, log = meta[0], meta[1]; role = (meta[2], meta[3]) if len(meta) == 4 else meta[2]
+        name, meta = item; url, log = meta[0], meta[1]; role = (meta[2], meta[3]) if len(meta) >= 4 else meta[2]
+        ptype = meta[4] if len(meta) > 4 else "llama.cpp"
         ok, mid = False, ""
         try:
             # 超时须 ≥ SGLang /health 的固有延迟（实测 ~1.0s），否则活端口被误判离线
@@ -647,8 +718,11 @@ def collect():
                     mid = ", ".join(dict.fromkeys(ids)) if ids else ""
             except Exception:
                 pass
+        gpu = port_gpu(url.rsplit(":", 1)[-1], _pgmap) if ok else None
+        ctx = meta[5] if len(meta) > 5 else ""
         return {"name": name, "alive": ok, "model": mid, "engine": role[0] if isinstance(role, tuple) else role,
-                    "tps": role[1] if isinstance(role, tuple) else ""}
+                    "tps": role[1] if isinstance(role, tuple) else "",
+                    "draft": draft_label(ptype), "gpu": gpu, "ctx": ctx}
 
     # 离线端口缓存：死端口连接被延迟拒绝（Windows ~2s），每轮都探会把 collect 拖到 4s。
     # 活端口每轮照探；仅【连续 2 次失败】才缓存为离线 60s（单次超时多是瞬时抖动，
@@ -656,10 +730,10 @@ def collect():
     now = time.time()
 
     def probe_cached(item):
-        name, meta = item; role = (meta[2], meta[3]) if len(meta) == 4 else meta[2]
+        name, meta = item; role = (meta[2], meta[3]) if len(meta) >= 4 else meta[2]
         last = _port_cache.get(name)
         if last is not None and last[0] is False and now - last[1] < 60:
-            return {"name": name, "alive": False, "model": "", "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "_cached": True}
+            return {"name": name, "alive": False, "model": "", "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "ctx": "", "_cached": True}
         r = probe_one(item)
         if r["alive"]:
             _port_cache[name] = (True, now)
@@ -678,31 +752,35 @@ def collect():
             for r in ex.map(probe_cached, PORTS.items()):
                 ports_stat.append(r)
     except Exception:
-        ports_stat = [{"name": n, "alive": False, "model": "", "engine": v[2], "tps": v[3]} for n, v in PORTS.items()]
+        ports_stat = [{"name": n, "alive": False, "model": "", "engine": v[2], "tps": v[3],
+                       "draft": draft_label(v[4] if len(v) > 4 else "llama.cpp"), "gpu": None,
+                       "ctx": v[5] if len(v) > 5 else ""} for n, v in PORTS.items()]
     d["ports_stat"] = ports_stat
     # 当前端点健康 = 普查结果里该端口那一行（避免再单独探一次 health，重复耗时 ~1s）
     cur_alive = next((p["alive"] for p in ports_stat if PORTS.get(p["name"], (None,))[0] == ENDPOINT), None)
 
-    m = get_json("/v1/models")
+    # 后半段结果收拢（future 已在普查期间起跑，这里只等结果）
+    m = f_m.result()
     sg = is_sglang(m)
     d["is_sglang"] = sg
     d["is_strata"] = (not sg) and is_strata(m)
+    mt = f_mt.result()
     if d["is_strata"]:
-        d["strata_metrics"] = get_json("/metrics") or {}
+        try:
+            d["strata_metrics"] = json.loads(mt) if mt.strip().startswith("{") else {}
+        except Exception:
+            d["strata_metrics"] = {}
     d["model"] = os.path.basename(m["data"][0]["id"]) if m and m.get("data") else "?"
-    d["gpus"] = vram()
-    d["tm_cpu"] = tm_cpu()   # 后台线程采(阻塞~2s 无碍), UI 只读
-    try:
-        with urllib.request.urlopen(ENDPOINT + "/metrics", timeout=3) as r:
-            mt = r.read().decode("utf-8", "replace")
-        def _gauge(nm):
-            m = re.search(r"^[ 	]*" + re.escape(nm) + r"[ 	]+([0-9.eE+-]+)", mt, re.M)
-            return float(m.group(1)) if m else 0.0
-        d["mt_prompt_tps"] = _gauge("llamacpp:prompt_tokens_seconds")
-        d["mt_pred_tps"] = _gauge("llamacpp:predicted_tokens_seconds")
-        d["mt_processing"] = _gauge("llamacpp:requests_processing")
-    except Exception:
-        d["mt_prompt_tps"] = d["mt_pred_tps"] = d["mt_processing"] = None
+    d["gpus"] = f_gpus.result()
+    d["tm_cpu"] = f_cpu.result()   # 后台线程采(阻塞~3.5s 无碍), UI 只读
+    def _gauge(nm):
+        mm = re.search(r"^[ 	]*" + re.escape(nm) + r"[ 	]+([0-9.eE+-]+)", mt, re.M)
+        return float(mm.group(1)) if mm else 0.0
+    d["mt_prompt_tps"] = _gauge("llamacpp:prompt_tokens_seconds")
+    d["mt_pred_tps"] = _gauge("llamacpp:predicted_tokens_seconds")
+    d["mt_processing"] = _gauge("llamacpp:requests_processing")
+    d["deaths"] = f_deaths.result()
+    d["up"] = uptime_sglang() if sg else f_up.result()
     if sg:
         # SGLang 路径：无 /slots，改从日志解析
         st = sglang_stats()
@@ -717,13 +795,12 @@ def collect():
                        "id_task": None,
                        "_sg": st}]
     else:
-        d["running"] = server_running()
-        d["health"] = get_json("/health")
-        d["slots"] = get_json("/slots") or []
-        d["reqs"] = recent_requests(50)
-        d["err"] = last_error()
-    d["deaths"] = death_stats()
-    d["up"] = uptime_sglang() if sg else uptime()
+        d["running"] = f_run.result()
+        d["health"] = f_health.result()
+        d["slots"] = f_slots.result() or []
+        d["reqs"] = f_reqs.result()
+        d["err"] = f_err.result()
+    _bigpool.shutdown(wait=False)
     try:
         d["mode"] = open(MODE_FILE, encoding="utf-8").read().strip()
     except OSError:
@@ -826,8 +903,8 @@ class SettingsDialog(QDialog):
         tip = QLabel("双击单元格直接编辑；type 决定渲染路径（strata / llama.cpp / ik / sglang）。保存后立即生效。")
         tip.setProperty("class", "dim"); tip.setWordWrap(True)
         lay.addWidget(tip)
-        self.tbl = QTableWidget(0, 6)
-        self.tbl.setHorizontalHeaderLabels(["显示名", "地址", "引擎日志", "引擎", "速度(显示用)", "类型"])
+        self.tbl = QTableWidget(0, 7)
+        self.tbl.setHorizontalHeaderLabels(["显示名", "地址", "引擎日志", "引擎", "速度(显示用)", "上下文", "类型"])
         self.tbl.verticalHeader().setVisible(False)
         hh = self.tbl.horizontalHeader(); hh.setSectionResizeMode(QHeaderView.Stretch)
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -857,13 +934,14 @@ class SettingsDialog(QDialog):
         self.tbl.setItem(r, 2, QTableWidgetItem(str(p.get("log", ""))))
         self.tbl.setItem(r, 3, QTableWidgetItem(str(p.get("engine", ""))))
         self.tbl.setItem(r, 4, QTableWidgetItem(str(p.get("tps", ""))))
+        self.tbl.setItem(r, 5, QTableWidgetItem(str(p.get("ctx", ""))))
         cb = QComboBox(); cb.addItems(self.TYPES)
         cb.setCurrentText(p.get("type", "llama.cpp"))
-        self.tbl.setCellWidget(r, 5, cb)
+        self.tbl.setCellWidget(r, 6, cb)
 
     def _add(self):
         self._add_row({"name": "新端点", "url": "http://127.0.0.1:8099",
-                       "log": "", "engine": "", "tps": "", "type": "llama.cpp"})
+                       "log": "", "engine": "", "tps": "", "ctx": "", "type": "llama.cpp"})
 
     def _del(self):
         r = self.tbl.currentRow()
@@ -877,11 +955,11 @@ class SettingsDialog(QDialog):
             def cell(c, _r=r):
                 it = self.tbl.item(_r, c)
                 return it.text().strip() if it else ""
-            cb = self.tbl.cellWidget(r, 5)
+            cb = self.tbl.cellWidget(r, 6)
             if not cell(0) or not cell(1):
                 continue
             ports.append({"name": cell(0), "url": cell(1), "log": cell(2),
-                          "engine": cell(3), "tps": cell(4),
+                          "engine": cell(3), "tps": cell(4), "ctx": cell(5),
                           "type": cb.currentText() if cb else "llama.cpp"})
         cfg["ports"] = ports
         cfg["live_dir"] = self.ed_live.text().strip() or cfg.get("live_dir")
@@ -895,12 +973,14 @@ class Win(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("llama 监控")
-        self.resize(860, 600)
-        self.setMinimumSize(560, 420)
+        self.resize(880, 820)
         self.data = {}
         self.was_running = None
         self.was_proxy = None
         self.build()
+        # 窗口最小尺寸 = 布局真实需求（显存 8 行撑开后手动缩小也不会裁内容）
+        ms = self.centralWidget().minimumSizeHint()
+        self.setMinimumSize(max(560, ms.width() + 24), max(640, ms.height() + 48))
         self.load_geometry()
         self._phase_target = 0
         self._anim_targets = {"phase": 0, "ctx": 0}
@@ -934,15 +1014,20 @@ class Win(QMainWindow):
         btn_cfg.clicked.connect(self.open_settings)
         caprow.addWidget(cap); caprow.addStretch(1); caprow.addWidget(btn_cfg)
         tv.addLayout(caprow)
-        self.tbl_ports = QTableWidget(0, 5)
-        self.tbl_ports.setHorizontalHeaderLabels(["端口", "引擎", "理论速度", "模型", "状态"])
+        self.tbl_ports = QTableWidget(0, 8)
+        self.tbl_ports.setHorizontalHeaderLabels(["端口", "引擎", "理论速度", "上下文", "模型", "草稿", "显卡", "状态"])
         self.tbl_ports.verticalHeader().setVisible(False)
         self.tbl_ports.verticalHeader().setDefaultSectionSize(22)
         self.tbl_ports.setEditTriggers(QTableWidget.NoEditTriggers)
         self.tbl_ports.setSelectionBehavior(QTableWidget.SelectRows)
         ph = self.tbl_ports.horizontalHeader(); ph.setSectionResizeMode(QHeaderView.Stretch)
+        ph.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         ph.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         ph.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        ph.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        ph.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        ph.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        ph.setSectionResizeMode(7, QHeaderView.ResizeToContents)
         # 固定三行高：在线的排最上所以前三行就是重点，其余靠滚动条
         self.tbl_ports.setFixedHeight(min(6, len(PORTS)) * 22 + 32)
         self.tbl_ports.cellClicked.connect(self._pick_port)
@@ -967,21 +1052,20 @@ class Win(QMainWindow):
         self.ctx_row,  self.ctx_lab,  self.bar_ctx  = bar_row("上下文")
         self.phase_row, self.phase_lab, self.bar_phase = bar_row("阶段（预填充 / 解码）")
         left.addWidget(self.ctx_row); left.addWidget(self.phase_row)
-        # 显存条（原版样式：标题含温度，右侧 已用/总量），5 卡纵向滚动
-        self.vm0_row, self.vm0_lab, self.vm0_val, self.bar_vm0 = vram_row("GPU 0 显存")
-        self.vm1_row, self.vm1_lab, self.vm1_val, self.bar_vm1 = vram_row("GPU 1 显存")
-        self.vm2_row, self.vm2_lab, self.vm2_val, self.bar_vm2 = vram_row("GPU 2 显存")
-        self.vm3_row, self.vm3_lab, self.vm3_val, self.bar_vm3 = vram_row("GPU 3 显存")
-        self.vm4_row, self.vm4_lab, self.vm4_val, self.bar_vm4 = vram_row("GPU 4 显存")
-        self.gpu_scroll = QScrollArea(); self.gpu_scroll.setWidgetResizable(True)
-        self.gpu_scroll.setFixedHeight(150)
-        self.gpu_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.gpu_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # 显存条（原版样式：标题含温度，右侧 已用/总量），固定 8 槽位：没插的卡显示"未插入"
+        N_GPU_SLOTS = 8
+        self.vm_rows, self.vm_labs, self.vm_vals, self.vm_bars = [], [], [], []
         gpu_holder = QWidget(); gpu_lay = QVBoxLayout(gpu_holder)
-        gpu_lay.setContentsMargins(0, 0, 0, 0); gpu_lay.setSpacing(0)
-        for w in (self.vm0_row, self.vm1_row, self.vm2_row, self.vm3_row, self.vm4_row):
-            gpu_lay.addWidget(w)
+        gpu_lay.setContentsMargins(0, 0, 0, 0); gpu_lay.setSpacing(8)
+        for _i in range(N_GPU_SLOTS):
+            row, lab, val, bar = vram_row(f"GPU {_i} 显存")
+            self.vm_rows.append(row); self.vm_labs.append(lab)
+            self.vm_vals.append(val); self.vm_bars.append(bar)
+            gpu_lay.addWidget(row)
         gpu_lay.addStretch(1)
+        self.gpu_scroll = QScrollArea(); self.gpu_scroll.setWidgetResizable(True)
+        self.gpu_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.gpu_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.gpu_scroll.setWidget(gpu_holder)
         left.addSpacing(6)
         left.addWidget(self.gpu_scroll)
@@ -1010,11 +1094,12 @@ class Win(QMainWindow):
         tbv.addLayout(caprow2)
         self.table = QTableWidget(0, 8)
         self.table.setAlternatingRowColors(True)
-        self.table.setHorizontalHeaderLabels(["task", "输入tok", "生成tok", "tok/s", "draft", "会话总量", "耗时", "状态"])
+        self.table.setHorizontalHeaderLabels(["模型", "输入tok", "生成tok", "tok/s", "draft", "会话总量", "耗时", "调用时间"])
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(19)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         hh = self.table.horizontalHeader(); hh.setSectionResizeMode(QHeaderView.Stretch)
+        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         tbv.addWidget(self.table)
         self.table.setMinimumHeight(4 * 19 + 30)   # 至少完整显示四行 + 表头
@@ -1197,7 +1282,8 @@ class Win(QMainWindow):
             g = cfg.get("geometry")
             if g and len(g) == 4:
                 x, y, w, h = g
-                self.setGeometry(x, y, max(w, 460), max(h, 360))
+                need = self.centralWidget().minimumSizeHint()
+                self.setGeometry(x, y, max(w, need.width() + 24), max(h, need.height() + 48))
         except Exception:
             pass
         self._save_timer = QTimer(self, singleShot=True, interval=500)
@@ -1451,21 +1537,17 @@ class Win(QMainWindow):
         up = d.get("up")
         h, m = (int(up // 3600), int(up % 3600 // 60)) if up is not None else (0, 0)
         set_txt(self.v_up, f"{h}h{m:02d}m" if up is not None else "—")
-        # GPU 显存行(数据层 vram() 已采, 渲染补位; 变化才写)
+        # GPU 显存行(数据层 vram() 已采, 渲染补位; 变化才写)：8 槽位，没插的显示"未插入"
         g = d.get("gpus") or []
-        for lab, val, bar, gp in (
-                (self.vm0_lab, self.vm0_val, self.bar_vm0, g[0] if len(g) > 0 else None),
-                (self.vm1_lab, self.vm1_val, self.bar_vm1, g[1] if len(g) > 1 else None),
-                (self.vm2_lab, self.vm2_val, self.bar_vm2, g[2] if len(g) > 2 else None),
-                (self.vm3_lab, self.vm3_val, self.bar_vm3, g[3] if len(g) > 3 else None),
-                (self.vm4_lab, self.vm4_val, self.bar_vm4, g[4] if len(g) > 4 else None)):
+        for _i, (lab, val, bar) in enumerate(zip(self.vm_labs, self.vm_vals, self.vm_bars)):
+            gp = g[_i] if _i < len(g) else None
             if gp:
                 pctv = 100 * gp["used"] // max(gp["tot"], 1)
                 set_txt(lab, f"GPU {gp['i']} 显存 · {gp['temp']}°C")
                 set_txt(val, f"{fmt_gb(gp['used'])} / {fmt_gb(gp['tot'])}  ({pctv}%)")
                 set_val(bar, pctv)
             else:
-                set_txt(lab, "GPU 显存 · —"); set_txt(val, "—"); set_val(bar, 0)
+                set_txt(lab, f"GPU {_i} 显存 · 未插入"); set_txt(val, "未插入"); set_val(bar, 0)
         # 请求表: 签名变化才重建
         sig = ";".join(f"{r.get('time')},{r.get('output_tokens')}" for r in reqs_s[:12])
         if sig != getattr(self, "_tbl_sig", None):
@@ -1476,14 +1558,30 @@ class Win(QMainWindow):
                          if r.get("drafts_offered") and r.get("drafts_accepted") is not None else "-")
                 tm = r.get("time")
                 ts_s = time.strftime("%H:%M:%S", time.localtime(tm)) if tm else "-"
-                vals = [ts_s, fmt_k(r.get("prompt_tokens")), fmt_k(r.get("output_tokens")),
-                        f"{r['decode_tok_s']:.1f}" if r.get("decode_tok_s") else "-",
-                        acc_s, fmt_k(r.get("prompt_total")), f"{r.get('duration_s') or '-'}s",
-                        str(r.get("hit_rate") if r.get("hit_rate") is not None else "-"), "✓"]
+                model_s = (self.lb_model.text() or "无")
+                ts_real = usage_ts_index().get((r.get("prompt_tokens"), r.get("output_tokens")))
+                vals = [model_s, fmt_k(r.get("prompt_tokens")), fmt_k(r.get("output_tokens")),
+                        f"{r['decode_tok_s']:.1f}" if r.get("decode_tok_s") else "无",
+                        acc_s if acc_s != "-" else "无", fmt_k(r.get("prompt_total")),
+                        f"{r.get('duration_s') or 0}s" if r.get("duration_s") else "无",
+                        ts_real or (r.get("id") if isinstance(r.get("id"), str) and ":" in str(r.get("id")) else "无记录")]
                 for j, v in enumerate(vals):
-                    self.table.setItem(i, j, QTableWidgetItem(str(v)))
+                    it = QTableWidgetItem(str(v))
+                    it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    self.table.setItem(i, j, it)
+
+    def _fit_gpu_scroll(self):
+        """显存区固定露出约 4 行，其余靠滚动（屏幕高度有限，不撑窗口）；
+        视口按行实际 sizeHint 计算，保证滚动范围>0 且滚到底必见最后一行。"""
+        rows = self.vm_rows
+        one = max(r.sizeHint().height() for r in rows) if rows else 32
+        gap = self.gpu_scroll.widget().layout().spacing()
+        need = 4 * one + 3 * gap + self.gpu_scroll.frameWidth() * 2 + 12
+        if abs(need - self.gpu_scroll.height()) >= 2:
+            self.gpu_scroll.setFixedHeight(need)
 
     def refresh(self):
+        self._fit_gpu_scroll()
         d = self.data
         if not d:
             return
@@ -1493,24 +1591,33 @@ class Win(QMainWindow):
             self._autoswitch(d.get("ports_stat") or [])
         else:
             self._reset_down_streak()
-        # 端口表整表重建：在线排最上，模型名/状态每秒写实
+        # 端口表：签名（顺序+全部格文本+在线态）变化才重建——每秒整表重写会把
+        # 选中高亮反复清除恢复，表现为"监控目标"行高亮闪动
         stat = d.get("ports_stat") or []
         stat_sorted = sorted(stat, key=lambda p: 0 if p["alive"] else 1)
-        self.tbl_ports.setRowCount(len(stat_sorted))
-        for i, p in enumerate(stat_sorted):
-            port_short = p["name"].split(" · ")[0]
-            it0 = QTableWidgetItem(port_short)
-            it0.setData(Qt.UserRole, p["name"])
-            it1 = QTableWidgetItem(p.get("engine") or "-")
-            it1b = QTableWidgetItem(p.get("tps") or "-")
-            it2 = QTableWidgetItem(p["model"] or "-")
-            it3 = QTableWidgetItem("● 在线" if p["alive"] else "○ 离线")
-            it3.setForeground(Qt.green if p["alive"] else Qt.gray)
-            for j, it in enumerate((it0, it1, it1b, it2, it3)):
-                self.tbl_ports.setItem(i, j, it)
-        cur = self._cur_port_row()
-        if cur >= 0:
-            self.tbl_ports.selectRow(cur)
+        psig = ";".join(f"{p['name']},{p.get('engine')},{p.get('tps')},{p.get('ctx')},{p.get('model')},"
+                        f"{p.get('draft')},{p.get('gpu')},{p['alive']}" for p in stat_sorted)
+        if psig != getattr(self, "_ports_sig", None):
+            self._ports_sig = psig
+            self.tbl_ports.setRowCount(len(stat_sorted))
+            for i, p in enumerate(stat_sorted):
+                port_short = p["name"].split(" · ")[0]
+                it0 = QTableWidgetItem(port_short)
+                it0.setData(Qt.UserRole, p["name"])
+                it1 = QTableWidgetItem(p.get("engine") or "无")
+                it1b = QTableWidgetItem(p.get("tps") or "无")
+                it1c = QTableWidgetItem(p.get("ctx") or "无")
+                it2 = QTableWidgetItem(p["model"] or "无")
+                it3 = QTableWidgetItem(p.get("draft") or "无")
+                it4 = QTableWidgetItem((p.get("gpu") or "无卡") if p["alive"] else "离线")
+                it5 = QTableWidgetItem("● 在线" if p["alive"] else "○ 离线")
+                it5.setForeground(Qt.green if p["alive"] else Qt.gray)
+                for j, it in enumerate((it0, it1, it1b, it1c, it2, it3, it4, it5)):
+                    it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    self.tbl_ports.setItem(i, j, it)
+            cur = self._cur_port_row()
+            if cur >= 0:
+                self.tbl_ports.selectRow(cur)
         set_txt(self.lb_clock, datetime.datetime.now().strftime("%m-%d %H:%M:%S"))
         if d.get("is_strata"):
             self._render_strata(d)
@@ -1563,20 +1670,16 @@ class Win(QMainWindow):
             acc = [r["acc"] for r in reqs if r.get("acc") is not None]
             self.v_dft.setText(f"{sum(acc)/len(acc):.2f}" if acc else "—")
         g = d["gpus"]
-        # 显存条：原版样式，扩到 5 卡
-        for lab, val, bar, gp in (
-                (self.vm0_lab, self.vm0_val, self.bar_vm0, g[0] if len(g) > 0 else None),
-                (self.vm1_lab, self.vm1_val, self.bar_vm1, g[1] if len(g) > 1 else None),
-                (self.vm2_lab, self.vm2_val, self.bar_vm2, g[2] if len(g) > 2 else None),
-                (self.vm3_lab, self.vm3_val, self.bar_vm3, g[3] if len(g) > 3 else None),
-                (self.vm4_lab, self.vm4_val, self.bar_vm4, g[4] if len(g) > 4 else None)):
+        # 显存条：原版样式，8 槽位，没插的显示"未插入"
+        for _i, (lab, val, bar) in enumerate(zip(self.vm_labs, self.vm_vals, self.vm_bars)):
+            gp = g[_i] if _i < len(g) else None
             if gp:
                 pctv = 100 * gp["used"] // max(gp["tot"], 1)
                 lab.setText(f"GPU {gp['i']} 显存 · {gp['temp']}°C")
                 val.setText(f"{fmt_gb(gp['used'])} / {fmt_gb(gp['tot'])}  ({pctv}%)")
                 bar.setValue(pctv)
             else:
-                lab.setText("GPU 显存 · —"); val.setText("—"); bar.setValue(0)
+                lab.setText(f"GPU {_i} 显存 · 未插入"); val.setText("未插入"); bar.setValue(0)
 
         # 上下文条(llama.cpp/SGLang 路径; Strata 已提前 return)
         # 2026-10-10 修复: 删旧版"顶部瓷砖同步"——bar_ph 已是内存卡, 被硬写成 phase 值(空闲=0)
@@ -1650,14 +1753,19 @@ class Win(QMainWindow):
             if sg:
                 code = r.get("code")
                 st = "▲" if code == "200" and busy else ("✓" if code == "200" else f"✗{code}")
-            vals = [r["id"], fmt_k(r.get("pt")), fmt_k(r.get("ct")),
-                    f"{r['tps']:.1f}" if r.get("tps") else "-",
-                    f"{r['acc']:.2f}" if r.get("acc") is not None else "-",
-                    fmt_k(r.get("total", "-")), ms_s, st]
+            # llama.cpp 路径：墙钟时间在 id 字段（945c99d 起 task 编号=时分秒）；网关流水配对兜底
+            _id = str(r.get("id") or "")
+            ts_r = _id if ":" in _id else (usage_ts_index().get((r.get("pt"), r.get("ct"))) or "无记录")
+            model_s = (self.lb_model.text() or "无")
+            vals = [model_s, fmt_k(r.get("pt")), fmt_k(r.get("ct")),
+                    f"{r['tps']:.1f}" if r.get("tps") else "无",
+                    f"{r['acc']:.2f}" if r.get("acc") is not None else "无",
+                    fmt_k(r.get("total", "无")), ms_s if ms_s != "-" else "无", ts_r]
             for j, v in enumerate(vals):
                 it = QTableWidgetItem(str(v))
-                if j == len(vals) - 1:
-                    it.setForeground(Qt.green if busy else Qt.darkGray)
+                it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                if busy:
+                    it.setForeground(Qt.green)
                 self.table.setItem(i, j, it)
 
         # 狗（一行）
