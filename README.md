@@ -20,6 +20,7 @@
 | 版本 | 包 | 里程碑 |
 |---|---|---|
 | [v1.0](https://github.com/denjhang/llama-monitor/releases/tag/v1.0) | llama-monitor-v1.0.exe | 首个独立 exe：可固定任务栏、网关多模型路由、live 分文件防混流 |
+| [v1.2](https://github.com/denjhang/llama-monitor/releases/tag/v1.2) | llama-monitor-v1.2.exe | 显存 8 槽位（未插入占位）+父层裁剪修复、端口表防闪动、冷启动数据 30-40s→4s、「上下文」独立列、速度单值 |
 | [v1.1](https://github.com/denjhang/llama-monitor/releases/tag/v1.1) | llama-monitor-v1.1.exe | 配置化：⚙ 设置对话框增删改端点、配置文件热重载、最近请求导出 CSV、后端类型化（strata/llama.cpp/ik/sglang） |
 
 ## ⚙ 配置文件（2026-10-11 起）
