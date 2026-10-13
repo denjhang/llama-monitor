@@ -6,24 +6,6 @@
   "exe": "D:/llama/llama-server.exe",
   "ports": [
     {
-      "name": "8081 · Strata Flash-Next",
-      "url": "http://127.0.0.1:8081",
-      "log": "E:/strata-src/strata-iq3_s.log",
-      "engine": "Strata",
-      "tps": "42 t/s",
-      "type": "strata",
-      "ctx": "262K"
-    },
-    {
-      "name": "8082 · qwen3.8-27b",
-      "url": "http://127.0.0.1:8082",
-      "log": "D:/llama/server-qwen38-27b.err.log",
-      "engine": "ik_llama+DFlash2",
-      "tps": "12 t/s",
-      "type": "ik",
-      "ctx": ""
-    },
-    {
       "name": "8083 · spark-therapy-4b",
       "url": "http://127.0.0.1:8083",
       "log": "D:/llama/boot-spark-v3f.err.log",
@@ -33,13 +15,13 @@
       "ctx": "262K"
     },
     {
-      "name": "8086 · gemma-4-e4b",
-      "url": "http://127.0.0.1:8086",
-      "log": "D:/llama/server-gemma4.err.log",
+      "name": "8089 · k2-horizon-36b",
+      "url": "http://127.0.0.1:8089",
+      "log": "D:/llama/server-k2.err.log",
       "engine": "llama.cpp",
-      "tps": "70 t/s",
-      "type": "llama.cpp",
-      "ctx": "131K"
+      "tps": "60 t/s",
+      "ctx": "131K",
+      "type": "llama.cpp"
     }
   ]
 }
