@@ -1,27 +1,27 @@
 {
-  "default_port": "8081 · Strata Flash-Next",
+  "default_port": "8081 · Flash-Next IQ3_S",
   "live_dir": "D:/llama",
   "events_log": "D:/llama/watchdog-events.log",
   "mode_file": "D:/llama/server-mode.txt",
   "exe": "D:/llama/llama-server.exe",
   "ports": [
     {
-      "name": "8083 · spark-therapy-4b",
-      "url": "http://127.0.0.1:8083",
-      "log": "D:/llama/boot-spark-v3f.err.log",
-      "engine": "llama.cpp(无草稿)",
-      "tps": "95 t/s",
-      "type": "llama.cpp",
-      "ctx": "262K"
+      "name": "8080 · 网关",
+      "url": "http://127.0.0.1:8080",
+      "log": "D:/llama/gateway-8080.err.log",
+      "engine": "model-tee(网关)",
+      "tps": "",
+      "ctx": "",
+      "type": "gateway"
     },
     {
-      "name": "8089 · k2-horizon-36b",
-      "url": "http://127.0.0.1:8089",
-      "log": "D:/llama/server-k2.err.log",
-      "engine": "llama.cpp",
-      "tps": "60 t/s",
-      "ctx": "131K",
-      "type": "llama.cpp"
+      "name": "8081 · Flash-Next IQ3_S",
+      "url": "http://127.0.0.1:8081",
+      "log": "D:/llama/strata-iq3s.out.log",
+      "engine": "Strata(专家缓存)",
+      "tps": "46 t/s",
+      "ctx": "262K",
+      "type": "strata"
     }
   ]
 }

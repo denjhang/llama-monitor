@@ -172,7 +172,124 @@ taskkill /IM llama-server.exe /F
 - 无思考模式：agent 工作流效率 ~10x（像素鸟 3 分钟一次性可玩），代价=陷阱盲判（9.11 vs 9.9 答错）
 - WSL2 + SGLang 提速方案（90-200 t/s）搁置中，等 E 盘腾空间 + 重启日
 
-## 八、相关文档
+## 八、内网穿透部署（公网访问）
+
+### 方案选型
+
+使用 frp（Fast Reverse Proxy）实现内网穿透，将本地 8080 网关暴露到公网。
+
+**服务商**：任意 frp 服务提供商（需自行注册账号）
+**协议**：TCP 或 HTTP
+**客户端**：frpc（Windows 版）
+
+### 部署步骤
+
+1. **下载 frp 客户端**
+
+   解压到工具目录（例如 `D:\tools\frp\`），通常包含：
+   - `frpc.exe` — 客户端主程序
+   - `frpc.toml` — 配置文件（由服务商后台生成）
+   - 安装/卸载脚本（需管理员权限）
+
+2. **运行安装脚本**
+
+   ```bash
+   # 右键"以管理员身份运行"安装脚本
+   # 会自动下载 frpc.exe、nssm.exe 等组件，并注册为 Windows 服务
+   ```
+
+3. **获取设备码**
+
+   运行"获取设备码"脚本，复制输出的设备码（例如 `3005054869f8`）。
+
+4. **配置隧道**
+
+   登录服务商后台：
+   - 绑定设备码
+   - 添加隧道：
+     - 本地地址：`127.0.0.1`
+     - 本地端口：`8080`
+     - 隧道类型：`TCP`（推荐）或 `HTTP`
+   - 保存后会生成 `frpc.toml` 配置文件
+
+5. **重启服务**
+
+   ```powershell
+   Restart-Service -Name FrpembedService -Force
+   ```
+
+   服务会自动读取 `frpc.toml` 并连接到服务商节点。
+
+6. **验证连通**
+
+   ```bash
+   # 假设分配的公网地址为 example.com:28024
+   curl http://example.com:28024/v1/models
+   ```
+
+   应返回本地模型列表。
+
+### 配置文件示例
+
+`frpc.toml`（由服务商后台自动生成，示例结构）：
+
+```toml
+serverAddr = "frp-server.example.com"
+serverPort = 7000
+user = "your_username"
+
+[metadatas]
+  secretPassword = "your_secret_hash"
+
+[[proxies]]
+  localIP = "127.0.0.1"
+  localPort = 8080
+  name = "ai"
+  remotePort = 28024  # 公网端口
+  type = "tcp"
+```
+
+### 安全注意事项
+
+- **无鉴权**：当前网关 8080 无认证机制，穿透后全网可访问
+- **防护建议**：
+  - 使用服务商提供的访问控制（IP 白名单）
+  - 网关层添加 API key 验证（修改 `model-tee.py`）
+  - 定期更换公网端口
+- **设备码保密**：设备码可绑定任意账号，勿泄露
+
+### 性能参考
+
+公网访问速度取决于：
+- 本地上行带宽
+- 服务商节点质量
+- 客户端到节点的网络延迟
+
+实测（家庭宽带 + BGP 节点）：
+- 本地直连：46 t/s
+- 公网穿透：17 t/s（含中转税 + 上行带宽限制）
+
+### 故障排查
+
+```bash
+# 检查服务状态
+Get-Service -Name FrpembedService | Select-Object Status
+
+# 查看日志（如果有）
+tail -f D:\tools\frp\frpc.log
+
+# 测试本地 8080 是否正常
+curl http://127.0.0.1:8080/v1/models
+
+# 测试公网地址
+curl http://your-domain:port/v1/models
+```
+
+后台显示"否"（未在线）→ 检查 `frpc.toml` 是否生成 → 重启服务
+
+---
+
+## 九、相关文档
 
 - 工作区总记忆：`K:\本地量化模型\modelscope\AGENTS.md`
 - 提速研究：`K:\本地量化模型\modelscope\_tools\qwen38-speedup\提速研究笔记.md`
