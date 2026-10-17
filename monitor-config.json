@@ -33,7 +33,8 @@
       "tps": "114 t/s",
       "ctx": "262K",
       "type": "llama",
-      "gpu": "GPU 3/4"
+      "gpu": "GPU 3/4",
+      "draft": "投机解码"
     }
   ]
 }

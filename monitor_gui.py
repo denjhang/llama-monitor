@@ -74,7 +74,7 @@ def _ports_from_cfg(cfg):
         try:
             out[p['name']] = (p['url'], p.get('log', ''), p.get('engine', ''),
                               p.get('tps', ''), p.get('type', 'llama.cpp'), p.get('ctx', ''),
-                              p.get('gpu', ''))
+                              p.get('gpu', ''), p.get('draft', ''))
         except KeyError:
             continue
     return out or _ports_from_cfg(DEFAULT_CONFIG)
@@ -723,9 +723,12 @@ def collect():
         gpu_static = meta[6] if len(meta) > 6 else None
         gpu = gpu_static if (gpu_static is not None) else (port_gpu(url.rsplit(":", 1)[-1], _pgmap) if ok else None)
         ctx = meta[5] if len(meta) > 5 else ""
+        # Draft: 优先用配置静态值(meta[7])，否则按type推断
+        draft_static = meta[7] if len(meta) > 7 else None
+        draft = draft_static if draft_static else draft_label(ptype)
         return {"name": name, "alive": ok, "model": mid, "engine": role[0] if isinstance(role, tuple) else role,
                     "tps": role[1] if isinstance(role, tuple) else "",
-                    "draft": draft_label(ptype), "gpu": gpu, "ctx": ctx}
+                    "draft": draft, "gpu": gpu, "ctx": ctx}
 
     # 离线端口缓存：死端口连接被延迟拒绝（Windows ~2s），每轮都探会把 collect 拖到 4s。
     # 活端口每轮照探；仅【连续 2 次失败】才缓存为离线 60s（单次超时多是瞬时抖动，
