@@ -721,7 +721,7 @@ def collect():
                 pass
         # GPU: 优先用配置静态值(meta[6])，探测失败才回退到实时探测
         gpu_static = meta[6] if len(meta) > 6 else None
-        gpu = gpu_static if gpu_static else (port_gpu(url.rsplit(":", 1)[-1], _pgmap) if ok else None)
+        gpu = gpu_static if (gpu_static is not None) else (port_gpu(url.rsplit(":", 1)[-1], _pgmap) if ok else None)
         ctx = meta[5] if len(meta) > 5 else ""
         return {"name": name, "alive": ok, "model": mid, "engine": role[0] if isinstance(role, tuple) else role,
                     "tps": role[1] if isinstance(role, tuple) else "",

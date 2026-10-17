@@ -23,7 +23,7 @@
       "tps": "46 t/s",
       "ctx": "262K",
       "type": "strata",
-      "gpu": "GPU 0-3"
+      "gpu": "GPU 0/1/2/3"
     },
     {
       "name": "8083 · Spark-therapy v3h",
