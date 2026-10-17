@@ -73,7 +73,8 @@ def _ports_from_cfg(cfg):
     for p in cfg.get('ports', DEFAULT_CONFIG['ports']):
         try:
             out[p['name']] = (p['url'], p.get('log', ''), p.get('engine', ''),
-                              p.get('tps', ''), p.get('type', 'llama.cpp'), p.get('ctx', ''))
+                              p.get('tps', ''), p.get('type', 'llama.cpp'), p.get('ctx', ''),
+                              p.get('gpu', ''))
         except KeyError:
             continue
     return out or _ports_from_cfg(DEFAULT_CONFIG)
@@ -718,7 +719,9 @@ def collect():
                     mid = ", ".join(dict.fromkeys(ids)) if ids else ""
             except Exception:
                 pass
-        gpu = port_gpu(url.rsplit(":", 1)[-1], _pgmap) if ok else None
+        # GPU: 优先用配置静态值(meta[6])，探测失败才回退到实时探测
+        gpu_static = meta[6] if len(meta) > 6 else None
+        gpu = gpu_static if gpu_static else (port_gpu(url.rsplit(":", 1)[-1], _pgmap) if ok else None)
         ctx = meta[5] if len(meta) > 5 else ""
         return {"name": name, "alive": ok, "model": mid, "engine": role[0] if isinstance(role, tuple) else role,
                     "tps": role[1] if isinstance(role, tuple) else "",
@@ -731,9 +734,10 @@ def collect():
 
     def probe_cached(item):
         name, meta = item; role = (meta[2], meta[3]) if len(meta) >= 4 else meta[2]
+        gpu_static = meta[6] if len(meta) > 6 else ""
         last = _port_cache.get(name)
         if last is not None and last[0] is False and now - last[1] < 60:
-            return {"name": name, "alive": False, "model": "", "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "ctx": "", "_cached": True}
+            return {"name": name, "alive": False, "model": "", "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "ctx": "", "gpu": gpu_static, "_cached": True}
         r = probe_one(item)
         if r["alive"]:
             _port_cache[name] = (True, now)

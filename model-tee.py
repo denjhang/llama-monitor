@@ -16,7 +16,7 @@ if len(_args) >= 2:
     ROUTES = [("", int(_args[1]))]          # "" 恒匹配 → 全部转发该上游
     DEFAULT_PORT = int(_args[1])
 else:
-    ROUTES = []   # Flash-Next 单模型，无路由规则（所有请求走默认端口）
+    ROUTES = [("spark", 8083), ("therapy", 8083)]   # spark/therapy 关键词路由到 8083
     # 默认上游：8081 = Strata Flash-Next IQ3_S；可用 TEE_DEFAULT_PORT 覆盖
     DEFAULT_PORT = int(os.environ.get("TEE_DEFAULT_PORT", "8081"))
 GATEWAY = len(_args) == 1   # 单参启动 = 网关（多后端按 model 路由 + /v1/models 聚合）

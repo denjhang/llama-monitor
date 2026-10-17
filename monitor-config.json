@@ -12,7 +12,8 @@
       "engine": "model-tee(网关)",
       "tps": "",
       "ctx": "",
-      "type": "gateway"
+      "type": "gateway",
+      "gpu": ""
     },
     {
       "name": "8081 · Flash-Next IQ3_S",
@@ -21,7 +22,18 @@
       "engine": "Strata(专家缓存)",
       "tps": "46 t/s",
       "ctx": "262K",
-      "type": "strata"
+      "type": "strata",
+      "gpu": "GPU 0-3"
+    },
+    {
+      "name": "8083 · Spark-therapy v3h",
+      "url": "http://127.0.0.1:8083",
+      "log": "D:/llama/server-xinghuo-v3h-draft.err.log",
+      "engine": "llama.cpp Q6_K + 1.7B draft",
+      "tps": "114 t/s",
+      "ctx": "262K",
+      "type": "llama",
+      "gpu": "GPU 3/4"
     }
   ]
 }
