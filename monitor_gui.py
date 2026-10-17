@@ -74,7 +74,8 @@ def _ports_from_cfg(cfg):
         try:
             out[p['name']] = (p['url'], p.get('log', ''), p.get('engine', ''),
                               p.get('tps', ''), p.get('type', 'llama.cpp'), p.get('ctx', ''),
-                              p.get('gpu', ''), p.get('draft', ''), p.get('model', ''))
+                              p.get('gpu', ''), p.get('draft', ''), p.get('model', ''),
+                              p.get('parallel', ''))
         except KeyError:
             continue
     return out or _ports_from_cfg(DEFAULT_CONFIG)
@@ -726,9 +727,11 @@ def collect():
         # Draft: 优先用配置静态值(meta[7])，否则按type推断
         draft_static = meta[7] if len(meta) > 7 else None
         draft = draft_static if draft_static else draft_label(ptype)
+        # Parallel: 读配置静态值(meta[9])
+        parallel = meta[9] if len(meta) > 9 else ""
         return {"name": name, "alive": ok, "model": mid, "engine": role[0] if isinstance(role, tuple) else role,
                     "tps": role[1] if isinstance(role, tuple) else "",
-                    "draft": draft, "gpu": gpu, "ctx": ctx}
+                    "draft": draft, "parallel": parallel, "gpu": gpu, "ctx": ctx}
 
     # 离线端口缓存：死端口连接被延迟拒绝（Windows ~2s），每轮都探会把 collect 拖到 4s。
     # 活端口每轮照探；仅【连续 2 次失败】才缓存为离线 60s（单次超时多是瞬时抖动，
@@ -739,9 +742,10 @@ def collect():
         name, meta = item; role = (meta[2], meta[3]) if len(meta) >= 4 else meta[2]
         gpu_static = meta[6] if len(meta) > 6 else ""
         model_static = meta[8] if len(meta) > 8 else ""
+        parallel_static = meta[9] if len(meta) > 9 else ""
         last = _port_cache.get(name)
         if last is not None and last[0] is False and now - last[1] < 60:
-            return {"name": name, "alive": False, "model": model_static, "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "ctx": "", "gpu": gpu_static, "_cached": True}
+            return {"name": name, "alive": False, "model": model_static, "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "ctx": "", "gpu": gpu_static, "parallel": parallel_static, "_cached": True}
         r = probe_one(item)
         if r["alive"]:
             _port_cache[name] = (True, now)
@@ -1023,8 +1027,8 @@ class Win(QMainWindow):
         btn_cfg.clicked.connect(self.open_settings)
         caprow.addWidget(cap); caprow.addStretch(1); caprow.addWidget(btn_cfg)
         tv.addLayout(caprow)
-        self.tbl_ports = QTableWidget(0, 8)
-        self.tbl_ports.setHorizontalHeaderLabels(["端口", "引擎", "理论速度", "上下文", "模型", "草稿", "显卡", "状态"])
+        self.tbl_ports = QTableWidget(0, 9)
+        self.tbl_ports.setHorizontalHeaderLabels(["端口", "引擎", "理论速度", "上下文", "模型", "草稿", "并发", "显卡", "状态"])
         self.tbl_ports.verticalHeader().setVisible(False)
         self.tbl_ports.verticalHeader().setDefaultSectionSize(22)
         self.tbl_ports.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1605,7 +1609,7 @@ class Win(QMainWindow):
         stat = d.get("ports_stat") or []
         stat_sorted = sorted(stat, key=lambda p: 0 if p["alive"] else 1)
         psig = ";".join(f"{p['name']},{p.get('engine')},{p.get('tps')},{p.get('ctx')},{p.get('model')},"
-                        f"{p.get('draft')},{p.get('gpu')},{p['alive']}" for p in stat_sorted)
+                        f"{p.get('draft')},{p.get('parallel')},{p.get('gpu')},{p['alive']}" for p in stat_sorted)
         if psig != getattr(self, "_ports_sig", None):
             self._ports_sig = psig
             self.tbl_ports.setRowCount(len(stat_sorted))
@@ -1618,10 +1622,11 @@ class Win(QMainWindow):
                 it1c = QTableWidgetItem(p.get("ctx") or "无")
                 it2 = QTableWidgetItem(p["model"] or "无")
                 it3 = QTableWidgetItem(p.get("draft") or "无")
+                it3b = QTableWidgetItem(p.get("parallel") or "无")
                 it4 = QTableWidgetItem((p.get("gpu") or "无卡") if p["alive"] else "离线")
                 it5 = QTableWidgetItem("● 在线" if p["alive"] else "○ 离线")
                 it5.setForeground(Qt.green if p["alive"] else Qt.gray)
-                for j, it in enumerate((it0, it1, it1b, it1c, it2, it3, it4, it5)):
+                for j, it in enumerate((it0, it1, it1b, it1c, it2, it3, it3b, it4, it5)):
                     it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                     self.tbl_ports.setItem(i, j, it)
             cur = self._cur_port_row()

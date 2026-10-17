@@ -13,7 +13,8 @@
       "tps": "",
       "ctx": "",
       "type": "gateway",
-      "gpu": ""
+      "gpu": "",
+      "parallel": ""
     },
     {
       "name": "8081 · Flash-Next IQ3_S",
@@ -23,7 +24,8 @@
       "tps": "46 t/s",
       "ctx": "262K",
       "type": "strata",
-      "gpu": "GPU 0/1/2/3"
+      "gpu": "GPU 0/1/2/3",
+      "parallel": "4"
     },
     {
       "name": "8083 · Spark-therapy v3h",
@@ -35,7 +37,8 @@
       "type": "llama",
       "gpu": "GPU 3/4",
       "draft": "投机解码",
-      "model": "spark-therapy-v3h"
+      "model": "spark-therapy-v3h",
+      "parallel": "2"
     },
     {
       "name": "8084 · Coder390",
@@ -46,7 +49,8 @@
       "ctx": "262K",
       "type": "ik",
       "gpu": "GPU 2/3",
-      "draft": "MTP"
+      "draft": "MTP",
+      "parallel": "2"
     }
   ]
 }
