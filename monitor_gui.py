@@ -740,12 +740,14 @@ def collect():
 
     def probe_cached(item):
         name, meta = item; role = (meta[2], meta[3]) if len(meta) >= 4 else meta[2]
+        ctx_static = meta[5] if len(meta) > 5 else ""
         gpu_static = meta[6] if len(meta) > 6 else ""
+        draft_static = meta[7] if len(meta) > 7 else ""
         model_static = meta[8] if len(meta) > 8 else ""
         parallel_static = meta[9] if len(meta) > 9 else ""
         last = _port_cache.get(name)
         if last is not None and last[0] is False and now - last[1] < 60:
-            return {"name": name, "alive": False, "model": model_static, "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "ctx": "", "gpu": gpu_static, "parallel": parallel_static, "_cached": True}
+            return {"name": name, "alive": False, "model": model_static, "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "ctx": ctx_static, "gpu": gpu_static, "draft": draft_static, "parallel": parallel_static, "_cached": True}
         r = probe_one(item)
         if r["alive"]:
             _port_cache[name] = (True, now)
