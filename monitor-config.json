@@ -31,7 +31,7 @@
       "log": "D:/llama/server-xinghuo-v3h-draft.err.log",
       "engine": "llama.cpp Q6_K + 1.7B draft",
       "tps": "114 t/s",
-      "ctx": "262K",
+      "ctx": "128K",
       "type": "llama",
       "gpu": "GPU 3/4",
       "draft": "投机解码"
