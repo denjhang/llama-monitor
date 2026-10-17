@@ -45,12 +45,12 @@
       "url": "http://127.0.0.1:8084",
       "log": "D:/llama/server-coder390-ik.err.log",
       "engine": "ik_llama Q3 + MTP",
-      "tps": "6 t/s",
+      "tps": "86-172 t/s",
       "ctx": "128K",
       "type": "ik",
-      "gpu": "GPU 2/3",
+      "gpu": "GPU 0/1/2/3",
       "draft": "MTP",
-      "parallel": "1"
+      "parallel": "2"
     }
   ]
 }
