@@ -16,7 +16,8 @@ if len(_args) >= 2:
     ROUTES = [("", int(_args[1]))]          # "" 恒匹配 → 全部转发该上游
     DEFAULT_PORT = int(_args[1])
 else:
-    ROUTES = [("spark", 8083), ("therapy", 8083)]   # spark/therapy 关键词路由到 8083
+    # 精确模型ID匹配路由（避免关键词误判）
+    ROUTES = [("spark-therapy-v3h", 8083)]
     # 默认上游：8081 = Strata Flash-Next IQ3_S；可用 TEE_DEFAULT_PORT 覆盖
     DEFAULT_PORT = int(os.environ.get("TEE_DEFAULT_PORT", "8081"))
 GATEWAY = len(_args) == 1   # 单参启动 = 网关（多后端按 model 路由 + /v1/models 聚合）
@@ -129,15 +130,15 @@ def classify_request(d):
     return st, text_flat + "\n" + "\n".join(lines)
 
 def pick_upstream(body):
-    """按请求体 model 字段关键词路由；无 body/未知关键词走默认"""
+    """按请求体 model 字段精确匹配路由；无 body/未知模型走默认"""
     if body:
         try:
             d0 = json.loads(body)
             m = (d0.get("model") or "").lower()
         except Exception:
             m = ""
-        for kw, port in ROUTES:
-            if kw and kw in m:
+        for model_id, port in ROUTES:
+            if model_id and m == model_id.lower():
                 return port
     return DEFAULT_PORT
 
