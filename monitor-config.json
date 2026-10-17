@@ -34,7 +34,8 @@
       "ctx": "128K",
       "type": "llama",
       "gpu": "GPU 3/4",
-      "draft": "投机解码"
+      "draft": "投机解码",
+      "model": "spark-therapy-v3h"
     },
     {
       "name": "8084 · Coder390",

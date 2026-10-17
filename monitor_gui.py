@@ -74,7 +74,7 @@ def _ports_from_cfg(cfg):
         try:
             out[p['name']] = (p['url'], p.get('log', ''), p.get('engine', ''),
                               p.get('tps', ''), p.get('type', 'llama.cpp'), p.get('ctx', ''),
-                              p.get('gpu', ''), p.get('draft', ''))
+                              p.get('gpu', ''), p.get('draft', ''), p.get('model', ''))
         except KeyError:
             continue
     return out or _ports_from_cfg(DEFAULT_CONFIG)
@@ -738,9 +738,10 @@ def collect():
     def probe_cached(item):
         name, meta = item; role = (meta[2], meta[3]) if len(meta) >= 4 else meta[2]
         gpu_static = meta[6] if len(meta) > 6 else ""
+        model_static = meta[8] if len(meta) > 8 else ""
         last = _port_cache.get(name)
         if last is not None and last[0] is False and now - last[1] < 60:
-            return {"name": name, "alive": False, "model": "", "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "ctx": "", "gpu": gpu_static, "_cached": True}
+            return {"name": name, "alive": False, "model": model_static, "engine": role[0] if isinstance(role, tuple) else role, "tps": role[1] if isinstance(role, tuple) else "", "ctx": "", "gpu": gpu_static, "_cached": True}
         r = probe_one(item)
         if r["alive"]:
             _port_cache[name] = (True, now)
