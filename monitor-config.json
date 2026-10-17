@@ -35,6 +35,17 @@
       "type": "llama",
       "gpu": "GPU 3/4",
       "draft": "投机解码"
+    },
+    {
+      "name": "8084 · Coder390",
+      "url": "http://127.0.0.1:8084",
+      "log": "D:/llama/server-coder390-ik.err.log",
+      "engine": "ik_llama Q3 + MTP",
+      "tps": "12 t/s",
+      "ctx": "262K",
+      "type": "ik",
+      "gpu": "GPU 2/3",
+      "draft": "MTP"
     }
   ]
 }
