@@ -51,6 +51,19 @@
       "gpu": "GPU 2/3",
       "draft": "DFlash2",
       "parallel": "1"
+    },
+    {
+      "name": "8085 · Qwen36-35B 治疗版",
+      "url": "http://127.0.0.1:8085",
+      "log": "D:/llama/server-qwen36-35b.err.log",
+      "engine": "ik_llama Q5_K_M + MTP",
+      "tps": "35-40 t/s",
+      "ctx": "128K",
+      "type": "llama",
+      "gpu": "GPU 2/3",
+      "draft": "MTP",
+      "model": "qwen3.6-35b-therapy",
+      "parallel": "1"
     }
   ]
 }
