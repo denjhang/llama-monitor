@@ -172,6 +172,15 @@ taskkill /IM llama-server.exe /F
 - 无思考模式：agent 工作流效率 ~10x（像素鸟 3 分钟一次性可玩），代价=陷阱盲判（9.11 vs 9.9 答错）
 - WSL2 + SGLang 提速方案（90-200 t/s）搁置中，等 E 盘腾空间 + 重启日
 
+### Coder390 decode 提速（2026-10-19 更新）
+
+27B 密集模型 decode 提速实录见 [`docs/ik_llama-Coder390-decode提速复盘.md`](docs/ik_llama-Coder390-decode提速复盘.md)，要点：
+
+- **多 GPU split 对 decode 是负收益**（4 卡 4-13 t/s，比单卡 31 t/s 还慢）；只对 prefill 有效
+- **MTP 头内投机在 27B 上负收益**（草稿≈一次全前向，接受率盖不住）
+- **DFlash2 专用草稿 + 同卡 = 决定性提速**：decode 28 → 45-52 t/s（+50%），草稿必须 `--device-draft` 与主模型首卡同卡，跨卡走 PCIe 会饿死
+- 草稿模型不能跨模型族通用，须共享 tokenizer（本机用 `z-lab/Qwen3.8-27B-DFlash2-GGUF`）
+
 ## 八、内网穿透部署（公网访问）
 
 ### 方案选型
