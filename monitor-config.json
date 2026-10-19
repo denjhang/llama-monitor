@@ -44,12 +44,12 @@
       "name": "8084 · Coder390",
       "url": "http://127.0.0.1:8084",
       "log": "D:/llama/server-coder390-ik.err.log",
-      "engine": "ik_llama Q3",
-      "tps": "32 t/s",
-      "ctx": "128K",
+      "engine": "ik_llama Q3 + DFlash2",
+      "tps": "45-52 t/s",
+      "ctx": "32K",
       "type": "ik",
       "gpu": "GPU 2/3",
-      "draft": "无",
+      "draft": "DFlash2",
       "parallel": "1"
     }
   ]
