@@ -21,10 +21,10 @@
       "url": "http://127.0.0.1:8081",
       "log": "D:/llama/strata-iq3s.out.log",
       "engine": "Strata 0.1.45(专家缓存)",
-      "tps": "53 t/s",
+      "tps": "66-75 t/s",
       "ctx": "262K",
       "type": "strata",
-      "gpu": "GPU 0/1/2/3",
+      "gpu": "GPU 0/1",
       "parallel": "4"
     },
     {
