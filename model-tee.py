@@ -17,7 +17,7 @@ if len(_args) >= 2:
     DEFAULT_PORT = int(_args[1])
 else:
     # 精确模型ID匹配路由（避免关键词误判）
-    ROUTES = [("spark-therapy-v3h", 8083)]
+    ROUTES = [("spark-therapy-v3h", 8083), ("qwen3.6-35b-therapy", 8085)]
     # 默认上游：8081 = Strata Flash-Next IQ3_S；可用 TEE_DEFAULT_PORT 覆盖
     DEFAULT_PORT = int(os.environ.get("TEE_DEFAULT_PORT", "8081"))
 GATEWAY = len(_args) == 1   # 单参启动 = 网关（多后端按 model 路由 + /v1/models 聚合）
