@@ -1587,6 +1587,10 @@ class Win(QMainWindow):
                     it = QTableWidgetItem(str(v))
                     it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                     self.table.setItem(i, j, it)
+        # 首次有数据时自动按内容适配列宽；之后尊重用户手动拖拽
+        if not getattr(self, "_reqs_autofit", False):
+            self._reqs_autofit = True
+            self.table.resizeColumnsToContents()
 
     def _fit_gpu_scroll(self):
         """显存区固定露出约 4 行，其余靠滚动（屏幕高度有限，不撑窗口）；
@@ -1634,6 +1638,10 @@ class Win(QMainWindow):
                 for j, it in enumerate((it0, it1, it1b, it1c, it2, it3, it3b, it4, it5)):
                     it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                     self.tbl_ports.setItem(i, j, it)
+            # 首次有数据时自动按内容适配列宽（相当于自动双击列缝）；之后尊重用户手动拖拽
+            if not getattr(self, "_ports_autofit", False):
+                self._ports_autofit = True
+                self.tbl_ports.resizeColumnsToContents()
             cur = self._cur_port_row()
             if cur >= 0:
                 self.tbl_ports.selectRow(cur)
