@@ -347,7 +347,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = strip_thinking(body, self.path)
         body = clear_think_budget(body, self.path)
         # 剥参后 body 变长，原 Content-Length 必须丢弃，urllib 会按新 data 自动重设
-        headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
+        # Origin/Referer 也要剥：网关对后端是同源代理，把浏览器页面的 Origin 原样转发
+        # 会让后端（Strata）的 DNS-rebinding 防护拒掉（"web pages of ... may not use this server"）
+        headers = {k: v for k, v in self.headers.items()
+                   if k.lower() not in ("host", "content-length", "origin", "referer")}
         port = pick_upstream(body)
         # 请求阶段：状态预判（填充/读图/压缩）写 live 区
         if is_chat and body:
