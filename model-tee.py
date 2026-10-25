@@ -188,14 +188,20 @@ def strip_thinking(body, path=""):
 def clear_think_budget(body, path=""):
     """Strata config 曾把 reasoning_budget_tokens 钉成 1，思考刚开头就被服务器注入
     "I have thought about this long enough" 强制收尾。请求自带该字段可覆盖 config 默认，
-    这里补 0（无限制）；客户端显式传了值就不动。仅 OpenAI 协议路径。"""
-    if "/chat/completions" not in path or not body:
+    这里补「无限制」；客户端显式传了值就不动。
+
+    实测（2026-10-24，llama.cpp v3h Q6_K，探针 8099）：
+      - 注入 0 = 零预算 = 思考一开始就被强制收尾（原 bug，三档思考全被杀成 0 字）
+      - 注入 -1 = disabled（common/sampling.h：`-1 = disabled, >= 0 = token budget`）→ 思考正常
+      - Anthropic /v1/messages 同样认这个字段，所以两条协议路径都要补
+        （ZCode 走的是 /v1/messages，只补 /chat/completions 等于没修）"""
+    if not body or ("/chat/completions" not in path and "/messages" not in path):
         return body
     try:
         d = json.loads(body)
         if not isinstance(d, dict) or "reasoning_budget_tokens" in d:
             return body
-        d["reasoning_budget_tokens"] = 0
+        d["reasoning_budget_tokens"] = -1
         return json.dumps(d, ensure_ascii=False).encode("utf-8")
     except Exception:
         pass
