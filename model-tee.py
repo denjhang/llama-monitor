@@ -21,7 +21,7 @@ else:
     # 默认上游：8081 = Strata Flash-Next IQ3_S；可用 TEE_DEFAULT_PORT 覆盖
     DEFAULT_PORT = int(os.environ.get("TEE_DEFAULT_PORT", "8081"))
 GATEWAY = len(_args) == 1   # 单参启动 = 网关（多后端按 model 路由 + /v1/models 聚合）
-PORT_NAMES = {8081: "flash-next-42ts", 8082: "qwen3.8-27b", 8086: "gemma-4-e4b", 8083: "sharp-spark-4b", 8091: "k2-horizon-4b", 8093: "granite-therapy-v1"}
+PORT_NAMES = {8081: "swift-1.5-iq3_s", 8082: "qwen3.8-27b", 8086: "gemma-4-e4b", 8083: "sharp-spark-4b", 8091: "k2-horizon-4b", 8093: "granite-therapy-v1"}
 # 对外绑定：网关默认 0.0.0.0（局域网可直连），单上游保持回环；均可用 TEE_HOST 覆盖
 TEE_HOST = os.environ.get("TEE_HOST") or ("0.0.0.0" if GATEWAY else "127.0.0.1")
 # 上游需要的鉴权 token：SGLang 用 --api-key，网关替客户端补上（key=端口）

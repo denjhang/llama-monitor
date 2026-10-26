@@ -1,5 +1,5 @@
 {
-  "default_port": "8081 · Flash-Next IQ3_S",
+  "default_port": "8081 · Swift-1.5 IQ3_S",
   "live_dir": "D:/llama",
   "events_log": "D:/llama/watchdog-events.log",
   "mode_file": "D:/llama/server-mode.txt",
@@ -17,14 +17,15 @@
       "parallel": ""
     },
     {
-      "name": "8081 · Flash-Next IQ3_S",
+      "name": "8081 · Swift-1.5 IQ3_S",
       "url": "http://127.0.0.1:8081",
-      "log": "D:/llama/strata-iq3s.out.log",
+      "log": "E:/strata-src/strata-swift-4gpu.log",
       "engine": "Strata 0.1.45(专家缓存)",
-      "tps": "66-75 t/s",
+      "tps": "",
       "ctx": "262K",
       "type": "strata",
-      "gpu": "GPU 0/1",
+      "gpu": "GPU 0/1/2/3",
+      "draft": "MTP",
       "parallel": "4"
     },
     {

@@ -119,7 +119,7 @@
 
 **旧的 E:/Strata-data/models/IQ3_S（79GB）暂不删**——等新模型验证可用后再与用户沟通替换（用户规则：废弃产物先沟通不自己删）。
 
-### 4.4 下一步：pack/mtp 复用性评估
+### 4.4 pack/mtp 复用性评估（结论见第六章）
 
 新模型是 GSQ-RCO 同格式、同 base（Qwen3.8-Flash-Next），但权重经治思考后训练有变化。启动前需实测：
 - `E:/Strata-data/packs/iq3_s`（dense.bin + expert 索引）——结构大概率兼容，但 expert 权重变了，**很可能需重新生成 pack**
@@ -130,11 +130,73 @@ Strata 配置可直接套用 `E:/strata-src/strata-iq3_s-4gpu.json`，只改 `--
 
 ---
 
-## 五、附带议题：四卡 Flash-Next 下能否再挂双卡 coder390（保 256K）
+## 五、部署结果（2026-10-26 已完成）
+
+**Swift-1.5 已替换原版 Flash-Next，全链路跑通。**
+
+### 5.1 关键发现：Strata 原生支持 Swift 1.5
+
+`E:/strata-src/setup.py` 里有 `--family swift` 支持（官方描述"thinks much shorter -63% thinking tokens, 1.8x sooner answers"），
+且 `SWIFT_FILES` 里 pinned 的 SHA256 与下载文件**完全一致**（shard1 `46cb3996`、shard2 `70ce6fb4`、mmproj `cd1140f4`）→ 确认下载的是官方期望文件。
+
+### 5.2 三个关键坑与解法
+
+| 坑 | 现象 | 解法 |
+|---|---|---|
+| **PLE 分片位置不同** | 引擎报 `per_layer_token_embd.weight is not in shard2` | 原版 PLE 表在分片2；**Swift 的 PLE 表在分片1**（层 13-47 在分片2）→ `--ple-gguf` 也要指向分片1 |
+| **USB 盘 PLE 随机读慢** | `--ple-io direct measures slow (129 rows/s, ~1MB/s)`，一个请求要几分钟 | 模型从 USB(J:) 迁到内置 SSD(E:) → **45194 rows/s（350 倍）** |
+| **MTP 无需重取** | 担心 Swift 后训练改了 MTP 头 | MTP 头来自**原始 Qwen base checkpoint**（不是 Swift 自己的）→ 现有 `E:/Strata-data/mtp/rt` 直接复用 |
+
+### 5.3 pack 重新生成（必需）
+
+Swift 张量数 373 vs 原版 1223（布局不同），pack 必须重建：
+```bash
+cd E:/strata-src
+export STRATA_GGUF_PY="E:/strata-src/third_party/llama.cpp/gguf-py"
+.venv/Scripts/python.exe tools/iq_pack.py \
+  --gguf "E:/Strata-data/models/swift-iq3_s/Swift-...-IQ3_S-00001-of-00002.gguf" \
+  --out "E:/Strata-data/packs/swift-iq3_s"
+# → 1079 tensors, 96 converted (96 exact), native_experts.txt v4（含 per-role shard 列）
+```
+
+### 5.4 磁盘替换（旧模型备份，未删除）
+
+- 旧 IQ3_S（79GB）→ `J:/Strata-backup/IQ3_S/`（三文件字节校验 OK，可随时恢复）
+- Swift（84.65GB）→ `E:/Strata-data/models/swift-iq3_s/`（内置 SATA SSD）
+- 恢复旧模型：`ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF`，哈希见 setup.py `ISTA_FILES`
+
+### 5.5 配置与实测
+
+- 配置：`E:/strata-src/strata-swift-iq3_s-4gpu.json`（四卡 GPU0-3，8081，256K，int8 KV，MTP）
+- 桌面 BAT：`1-启动Swift四卡.bat`
+- 监控：`D:/llama-monitor/monitor-config.json` 已改指 Swift
+- 网关：`model-tee.py` PORT_NAMES[8081] = `swift-1.5-iq3_s`
+
+**实测（内置 SSD）**：
+- 简单题（17×23）：思考 87 字符，2.5 秒经网关
+- 中等编程题（合并有序链表）：思考 254 字符，5.4 秒，222 tokens ≈ 41 t/s
+- 公网网页聊天：带 Origin 头成功返回中文，思考 382 字符
+- Qt 监控显示生成速度 60 t/s、DRAFT 命中 0.81
+
+**对比原版**：同类题原版思考动辄数千 token（用户实测 3-8 分钟），Swift 降到几百字符（秒级）——治思考效果显著，符合官方 -63% 数据。
+
+### 5.6 全链路状态（2026-10-26 15:15）
+
+| 项 | 状态 |
+|---|---|
+| 8081 Swift 四卡 | ✅ 在线，256K |
+| 8080 网关 | ✅ 在线，模型名 swift-1.5-iq3_s |
+| 公网 18c23w6n.zjz-service.cn:28024 | ✅ 网页 + API 正常 |
+| Qt 监控 | ✅ 显示 Swift，实时生成/请求记录正常 |
+| 显存 | GPU0 18.1G / GPU1-3 各 12.2G / GPU4 桌面 |
+
+---
+
+## 六、附带议题：四卡 Flash-Next 下能否再挂双卡 coder390（保 256K）
 
 **用户问**：当前 Flash-Next 占 GPU0-3 跑 256K，能否再载入双卡 coder390 并保 256K？
 
-### 5.1 coder390 @256K 显存账（基于其加载日志精算）
+### 6.1 coder390 @256K 显存账（基于其加载日志精算）
 
 coder390 是 `qwen35` 混合架构（SSM + 全注意力，`full_attention_interval=4`，65 层里 16 层带全注意力 KV）：
 
@@ -150,7 +212,7 @@ coder390 是 `qwen35` 混合架构（SSM + 全注意力，`full_attention_interv
 
 **关键**：coder390 的 KV 只要 4.5 GiB（16 层全注意力 + q4_0 KV），**KV 不是瓶颈，权重才是**。要两张连续卡各 13.2 GiB。
 
-### 5.2 当前各卡空闲（Flash-Next 四卡运行时）
+### 6.2 当前各卡空闲（Flash-Next 四卡运行时）
 
 | 卡 | 已用 | 空闲 | 说明 |
 |---|---|---|---|
@@ -158,13 +220,13 @@ coder390 是 `qwen35` 混合架构（SSM + 全注意力，`full_attention_interv
 | GPU1/2/3 | 各 12.5 | 各 7.5 | 专家缓存各 11.48 GiB |
 | GPU4 | 1.8 | 18.0 | 桌面卡 |
 
-### 5.3 结论：**原配置硬塞必崩**
+### 6.3 结论：**原配置硬塞必崩**
 
 - 双卡需连续两卡各 13.2 GiB，**无任何两张满足**（GPU1+2 仅 15 GiB，差 11 GiB）
 - GPU4 单卡 18 GiB 也不够 26.3，且单卡实测坍塌到 5-7 t/s
 - 硬塞会触发驱动往系统内存分页，速度掉到几 t/s
 
-### 5.4 两条可行路（都需重启 Flash-Next 改配置）
+### 6.4 两条可行路（都需重启 Flash-Next 改配置）
 
 **方案 A：Flash-Next 降 2 卡（GPU0,1），coder390 用 GPU2,3**
 - GPU2/3 各释放 20.5 GiB → coder390 双卡装得下，且回到原计算卡，桌面卡不受影响
@@ -179,7 +241,7 @@ coder390 是 `qwen35` 混合架构（SSM + 全注意力，`full_attention_interv
 
 ---
 
-## 六、待用户决策
+## 七、待用户决策
 
 1. ~~是否下载 Swift-1.5 IQ3_S？~~ ✅ **已下载并校验通过**（`J:/Swift15-IQ3_S/`）
 2. **下一步**：是否用 Swift-1.5 替换当前生产的 IQ3_S？需先试启动验证 pack/mtp 复用性，旧的 E: IQ3_S 暂不删。
