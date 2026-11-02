@@ -303,3 +303,18 @@ curl http://your-domain:port/v1/models
 - 工作区总记忆：`K:\本地量化模型\modelscope\AGENTS.md`
 - 提速研究：`K:\本地量化模型\modelscope\_tools\qwen38-speedup\提速研究笔记.md`
 - 崩溃快照/事件：`llama-b11139\crash-snapshots\`（full-*.log 为全量日志）、`watchdog-events.log`
+
+### docs/ 目录索引
+
+| 文档 | 内容 |
+|---|---|
+| **Strata-四卡真分片提速定论.md** | **2026-11-02 定论**：四卡四段真分片 + `--pipeline-windows 2`，decode 40.9 → 110.8 t/s；含 prefill CPU share、无效方向的实测排除 |
+| Strata-双卡vs四卡-纸面推理.md | KV 两级结构、四卡胜在专家缓存（**其"四卡一定更快"的分片前提已被定论篇修正**） |
+| Strata-FlashNext-提速复盘.md | 2026-10-19 引擎 0.1.41→0.1.45 提速记录 |
+| Flash-Next-治雷霆思考版本选型.md | Swift-1.5 选型 + 部署三坑（PLE 分片位置/USB 盘/PLE 随机读） |
+| ik_llama-Coder390-decode提速复盘.md | Coder390 DFlash2 草稿解码提速 |
+| 投机解码判据-dense-vs-MoE.md | 六轮实验：dense 赢、MoE 输、小模型无益 |
+| 改版后端vs本机-可借鉴性调查.md | NInfer 等专用后端 vs 本机 ik_llama |
+| 交接单-Strata-DeepSeek41研究计划.md | DeepSeek-V4.1-Flash 可行性（磁盘是门槛） |
+| API-端点.md | 端点汇总 |
+
