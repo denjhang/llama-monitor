@@ -1,0 +1,48 @@
+--- backup-web-20261102-232034/web/app.js	2026-11-02 23:20:35.128291400 +0800
++++ serve/web/app.js	2026-11-02 23:25:38.346288600 +0800
+@@ -503,13 +503,28 @@
+ });
+ 
+ // ------------------------------------------------------------------ Markdown (escaped first, then formatted)
++// KaTeX (serve/web/katex.min.js): $inline$ and $$display$$, the rule llama.cpp's webui parses with
++// remark-math (a formula that does not parse stays as written, never dropped).
++function renderMath(tex, display) {
++  const src = String(tex).trim();
++  if (!src) return "";
++  if (window.katex) {
++    try { return katex.renderToString(src, {displayMode: display, throwOnError: false, strict: "ignore"}); }
++    catch (e) { /* not TeX: shown as written below */ }
++  }
++  return `<code class="math-raw">${esc(src)}</code>`;
++}
+ function inline(s) {
+-  const codes = [];
++  const codes = [], maths = [];
+   s = s.replace(/`([^`\n]+)`/g, (_, c) => { codes.push(c); return `\u0000${codes.length - 1}\u0000`; });
++  // $...$ : no space just inside the dollars and no digit right after the closing one, so "$5 and $6" stays text
++  s = s.replace(/(?<![\\$])\$(?!\s)([^\n$]+?)(?<!\s)\$(?![\d$])/g,
++                 (_, tex) => { maths.push(tex); return `\u0001${maths.length - 1}\u0001`; });
+   s = esc(s)
+     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+     .replace(/(^|[^*\w])\*([^*\n]+)\*(?![*\w])/g, "$1<em>$2</em>")
+     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
++  s = s.replace(/\u0001(\d+)\u0001/g, (_, i) => renderMath(maths[+i], false));
+   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code class="inline">${esc(codes[+i])}</code>`);
+ }
+ function codeBlock(lang, code) {
+@@ -556,7 +571,15 @@
+ function markdown(text) {
+   let html = "", rest = text;
+   for (;;) {
++    // $$...$$ before the fenced-code scan: a display formula spans lines and must not be split into paragraphs
++    const d = rest.match(/(^|\n)[ \t]*\$\$([\s\S]*?)\$\$[ \t]*(\n|$)/);
+     const m = rest.match(/(^|\n)```([^\n`]*)\n/);
++    if (d && (!m || d.index < m.index)) {
++      html += blocks(rest.slice(0, d.index));
++      html += `<div class="st-math">${renderMath(d[2], true)}</div>`;
++      rest = rest.slice(d.index + d[0].length);
++      continue;
++    }
+     if (!m) { html += blocks(rest); break; }
+     html += blocks(rest.slice(0, m.index));
+     rest = rest.slice(m.index + m[0].length);
