@@ -1,4 +1,4 @@
-# 桌面启动 BAT 备份（更新于 2026-11-02）
+# 桌面启动 BAT 备份（更新于 2026-11-06）
 
 本目录备份桌面所有启动脚本 + 关键配置文件，便于换机/重装恢复。
 
@@ -6,6 +6,7 @@
 
 | 文件 | 用途 | 端口 | 卡 |
 |---|---|---|---|
+| `set-gpu-power-200w.bat` | **开机必跑：五卡功耗限 200W**（电源只 2000W） | — | GPU0-4 |
 | `启动Swift真分片.bat` | **Swift-1.5 四卡四段真分片（推荐）** | 8081 | GPU0-3 + GPU4 视觉 |
 | `启动FlashNext.bat` | 同上（英文注释版，历史） | 8081 | GPU0-3 + GPU4 视觉 |
 | `start-flashnext-4gpu.bat` | 同上的英文版（历史，配置指向已过时） | 8081 | GPU0-3 |
@@ -15,9 +16,43 @@
 | `启动内网穿透.bat` | frp 内网穿透 | — | — |
 | `start-coder390.bat` | Coder390 27B + DFlash2 | 8084 | GPU2/3 |
 
+桌面上的 `5-设置显卡功耗200W.bat` 是个转调壳（3 行 call），真正的脚本是本目录的
+`set-gpu-power-200w.bat` —— 桌面用中文名保持编号秩序，实际逻辑放 ASCII 路径，
+避免计划任务的编码问题。
+
 配置文件在 `E:\strata-src\`：
 - `strata-swift-iq3_s-4gpu.json` — **定版生产配置**（四段真分片 + pipeline-windows 2 + CPU share）
+- `strata-swift-iq3_s-fakesplit.json` — 假分片配置（对比测速用，42.6 t/s）
 - `strata-swift-iq3_s-4gpu.bak-kv20480` — 旧"假分片"配置备份（回退用）
+
+## 功耗铁律（2026-11-06 新增，最重要）
+
+**电源总额定只有 2000W，五卡必须限到 200W，否则整机会硬断电。**
+
+| 项 | 320W 上限（默认） | 200W 上限（当前） |
+|---|---|---|
+| 5 × RTX3080 | 1600W | 1000W（实测只用到 766W） |
+| 2 × Xeon + 外设 | ~450W | ~450W |
+| **整机峰值** | **~2050W ⚠️ 超额定** | **~1216W，余量 40%** |
+
+症状：`Kernel-Power 41` + `BugcheckCode=0` + 无 minidump（电源硬断电，不是蓝屏/软件 bug）。
+实测 decode 无损失：200W 下真分片 **138 t/s**（250W 时 127.6）。
+完整诊断：`docs/11-06-整机意外重启诊断.md`。
+
+**已注册开机任务**（重启后自动执行，不需要手动跑）：
+```
+任务名: GPU-PowerLimit-200W
+触发  : AtStartup + 延迟 30 秒
+身份  : SYSTEM / 最高权限
+动作  : cmd /c "D:\llama-monitor\desktop-bats\set-gpu-power-200w.bat"
+```
+删掉它：`Unregister-ScheduledTask -TaskName GPU-PowerLimit-200W -Confirm:$false`
+
+## 启动顺序
+
+```
+开机 → (任务自动限功耗) → 1 引擎 → 2 网关8080 → 3 监控 → 4 内网穿透
+```
 
 ## 关键约定
 
