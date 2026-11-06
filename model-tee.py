@@ -17,11 +17,12 @@ if len(_args) >= 2:
     DEFAULT_PORT = int(_args[1])
 else:
     # 精确模型ID匹配路由（避免关键词误判）
-    ROUTES = [("spark-therapy-v3h", 8083), ("qwen3.6-35b-therapy", 8085)]
-    # 默认上游：8081 = Strata Flash-Next IQ3_S；可用 TEE_DEFAULT_PORT 覆盖
+    ROUTES = [("spark-therapy-v3h", 8083), ("spark-therapy-4b", 8083),
+              ("qwen3.6-35b-therapy", 8085)]
+    # 默认上游：8081 = Strata Swift-1.5 IQ3_S；可用 TEE_DEFAULT_PORT 覆盖
     DEFAULT_PORT = int(os.environ.get("TEE_DEFAULT_PORT", "8081"))
 GATEWAY = len(_args) == 1   # 单参启动 = 网关（多后端按 model 路由 + /v1/models 聚合）
-PORT_NAMES = {8081: "swift-1.5-iq3_s", 8082: "qwen3.8-27b", 8086: "gemma-4-e4b", 8083: "sharp-spark-4b", 8091: "k2-horizon-4b", 8093: "granite-therapy-v1"}
+PORT_NAMES = {8083: "spark-therapy-4b", 8085: "qwen3.6-35b-therapy", 8081: "swift-1.5-iq3_s", 8082: "qwen3.8-27b", 8086: "gemma-4-e4b", 8091: "k2-horizon-4b", 8093: "granite-therapy-v1"}
 # 对外绑定：网关默认 0.0.0.0（局域网可直连），单上游保持回环；均可用 TEE_HOST 覆盖
 TEE_HOST = os.environ.get("TEE_HOST") or ("0.0.0.0" if GATEWAY else "127.0.0.1")
 # 上游需要的鉴权 token：SGLang 用 --api-key，网关替客户端补上（key=端口）
@@ -201,6 +202,8 @@ def clear_think_budget(body, path=""):
         d = json.loads(body)
         if not isinstance(d, dict) or "reasoning_budget_tokens" in d:
             return body
+        # 注意：不要设有限预算。实测把思考强行截断会让模型"话没说完"就停，
+        # 既不调工具也不给正文，ZCode 里表现为空白回复——比死循环更糟。
         d["reasoning_budget_tokens"] = -1
         return json.dumps(d, ensure_ascii=False).encode("utf-8")
     except Exception:

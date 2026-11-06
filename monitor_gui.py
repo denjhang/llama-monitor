@@ -557,19 +557,32 @@ def port_gpu(port, pgmap=None):
         pass
     return None
 
-def usage_ts_index(n=30):
-    """网关流水最近 n 条：{(prompt_tokens, completion_tokens): "HH:MM:SS"}，供请求表补真实调用时间"""
+def usage_ts_index(n=200):
+    """网关流水最近 n 条：{(prompt_tokens, completion_tokens): "HH:MM:SS"}，供请求表补真实调用时间。
+
+    另存 (None, completion_tokens) 兜底键：Strata 的 /v1/messages 上报的 input_tokens 恒为 1，
+    与引擎日志里的真实 prompt 长度对不上，只靠 (pt,ct) 会全部落到"无记录"。
+    生成数在单次会话里足够离散，用它配对能给回真实时刻。"""
     out = {}
     try:
         for l in open(r"D:" + chr(92) + "llama" + chr(92) + "tee-usage-8080.jsonl", encoding="utf-8", errors="replace").readlines()[-n:]:
             try:
                 r = json.loads(l)
-                out[(r.get("prompt_tokens"), r.get("completion_tokens"))] = r.get("ts") or ""
+                ts = r.get("ts") or ""
+                pt, ct = r.get("prompt_tokens"), r.get("completion_tokens")
+                out[(pt, ct)] = ts
+                out[(None, ct)] = ts
             except Exception:
                 pass
     except OSError:
         pass
     return out
+
+
+def ts_for(req, idx=None):
+    """请求行 -> 网关流水的真实调用时刻；先按 (prompt,生成) 精确配对，退化到只看生成数"""
+    idx = idx if idx is not None else usage_ts_index()
+    return idx.get((req.get("pt"), req.get("ct"))) or idx.get((None, req.get("ct"))) or ""
 
 def draft_label(port_type, cfg_ports=None):
     """草稿头显示：strata=MTP、ik=DFlash2、其余无（配置 ports[].draft 可覆盖）"""
@@ -1577,7 +1590,7 @@ class Win(QMainWindow):
                 tm = r.get("time")
                 ts_s = time.strftime("%H:%M:%S", time.localtime(tm)) if tm else "-"
                 model_s = (self.lb_model.text() or "无")
-                ts_real = usage_ts_index().get((r.get("prompt_tokens"), r.get("output_tokens")))
+                ts_real = ts_for({"pt": r.get("prompt_tokens"), "ct": r.get("output_tokens")})
                 vals = [model_s, fmt_k(r.get("prompt_tokens")), fmt_k(r.get("output_tokens")),
                         f"{r['decode_tok_s']:.1f}" if r.get("decode_tok_s") else "无",
                         acc_s if acc_s != "-" else "无", fmt_k(r.get("prompt_total")),
@@ -1784,7 +1797,7 @@ class Win(QMainWindow):
                 st = "▲" if code == "200" and busy else ("✓" if code == "200" else f"✗{code}")
             # llama.cpp 路径：墙钟时间在 id 字段（945c99d 起 task 编号=时分秒）；网关流水配对兜底
             _id = str(r.get("id") or "")
-            ts_r = _id if ":" in _id else (usage_ts_index().get((r.get("pt"), r.get("ct"))) or "无记录")
+            ts_r = _id if ":" in _id else (ts_for(r) or "无记录")
             model_s = (self.lb_model.text() or "无")
             vals = [model_s, fmt_k(r.get("pt")), fmt_k(r.get("ct")),
                     f"{r['tps']:.1f}" if r.get("tps") else "无",
